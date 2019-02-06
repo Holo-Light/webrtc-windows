@@ -36,4 +36,10 @@ static_library("winuwp_h264") {
     cflags = [ "/wd4467" ]
     cflags_cc = [ "/wd4467" ]
   }
+
+  #Actually this is only needed for desktop because the UWP config already
+  #includes it; otherwise we'd get linker errors when using WRL.
+  if (is_win) {
+    libs = ["runtimeobject.lib"]
+  }
 }
