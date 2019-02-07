@@ -34,6 +34,7 @@ class H264MediaSink;
 
 class WinUWPH264EncoderImpl : public VideoEncoder, public IH264EncodingCallback {
  public:
+  //this needs an extra ID3D11Device arg so we can create the IMFDXGIManager
   WinUWPH264EncoderImpl();
 
   ~WinUWPH264EncoderImpl();
@@ -50,6 +51,9 @@ class WinUWPH264EncoderImpl : public VideoEncoder, public IH264EncodingCallback 
   int SetRates(uint32_t new_bitrate_kbit, uint32_t frame_rate) override;
   ScalingSettings GetScalingSettings() const override;
   const char* ImplementationName() const override;
+
+  //we'd like to use this encoder in combination with direct3d 11 textures.
+  bool SupportsNativeHandle() const override { return true; }
 
   // === IH264EncodingCallback overrides ===
   void OnH264Encoded(ComPtr<IMFSample> sample) override;
@@ -80,6 +84,9 @@ class WinUWPH264EncoderImpl : public VideoEncoder, public IH264EncodingCallback 
   UINT32 currentBitrateBps_ {};
   UINT32 currentFps_ {};
   int64_t lastTimeSettingsChanged_ {};
+
+  ComPtr<IMFDXGIDeviceManager> spDxgiDeviceManager_;
+  UINT resetToken_ = 0;
 
   struct CachedFrameAttributes {
     uint32_t timestamp;

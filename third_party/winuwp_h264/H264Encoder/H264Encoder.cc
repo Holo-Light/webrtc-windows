@@ -33,10 +33,14 @@
 #include "rtc_base/logging.h"
 #include "rtc_base/win32.h"
 
+//this is bad and should actually live somewhere else, i.e. in media/ or so
+#include "examples/remoting/d3d11_frame_buffer.h"
+
 
 #pragma comment(lib, "mfreadwrite")
 #pragma comment(lib, "mfplat")
 #pragma comment(lib, "mfuuid.lib")
+#pragma comment(lib, "dxguid.lib")
 
 namespace webrtc {
 
@@ -189,92 +193,157 @@ ComPtr<IMFSample> WinUWPH264EncoderImpl::FromVideoFrame(const VideoFrame& frame)
   ComPtr<IMFAttributes> sampleAttributes;
   ON_SUCCEEDED(sample.As(&sampleAttributes));
 
-  rtc::scoped_refptr<I420BufferInterface> frameBuffer =
+  //this needs to distinguish between i420 and native buffers,
+  //otherwise it'll just crash
+  if (frame.video_frame_buffer().get()->type() == VideoFrameBuffer::Type::kNative) {
+    //do directx stuff here, i.e. cast to D3D11VideoFrameBuffer, get texture pointer and create sample from that
+    rtc::scoped_refptr<hololight::D3D11VideoFrameBuffer> frameBuffer = static_cast<hololight::D3D11VideoFrameBuffer*>(frame.video_frame_buffer().get());
+    ComPtr<ID3D11Texture2D> backingTexture = frameBuffer->GetBackingTexture();
+    ComPtr<IUnknown> spUnkTexture;
+    ComPtr<IMFMediaBuffer> spMediaBuffer;
+    hr = backingTexture.As(&spUnkTexture);
+
+    if (SUCCEEDED(hr)) {
+      hr = MFCreateDXGISurfaceBuffer(IID_ID3D11Texture2D, spUnkTexture.Get(), 0, FALSE, &spMediaBuffer);
+      
+      if (SUCCEEDED(hr)) {
+        //TODO: extract common pieces of this code block that apply to DX/not DX and refactor
+        auto timestampHns = ((frame.timestamp() - startTime_) / 90) * 1000 * 10;
+        ON_SUCCEEDED(sample->SetSampleTime(timestampHns));
+
+        if (SUCCEEDED(hr)) {
+          auto durationHns = timestampHns - lastTimestampHns_;
+          hr = sample->SetSampleDuration(durationHns);
+        }
+
+        if (SUCCEEDED(hr)) {
+          lastTimestampHns_ = timestampHns;
+
+          // Cache the frame attributes to get them back after the encoding.
+          CachedFrameAttributes frameAttributes;
+          frameAttributes.timestamp = frame.timestamp();
+          frameAttributes.ntpTime = frame.ntp_time_ms();
+          frameAttributes.captureRenderTime = frame.render_time_ms();
+          frameAttributes.frameWidth = frame.width();
+          frameAttributes.frameHeight = frame.height();
+          _sampleAttributeQueue.push(timestampHns, frameAttributes);
+        }
+
+        // ON_SUCCEEDED(mediaBuffer->SetCurrentLength(
+        //   frameBuffer->width() * frameBuffer->height() * 3 / 2));
+
+        // if (destBuffer != nullptr) {
+        //   mediaBuffer->Unlock();
+        // }
+
+        ON_SUCCEEDED(sample->AddBuffer(spMediaBuffer.Get()));
+
+        if (lastFrameDropped_) {
+          lastFrameDropped_ = false;
+          sampleAttributes->SetUINT32(MFSampleExtension_Discontinuity, TRUE);
+        }
+        //end TODO
+      }
+    }
+
+    
+  } else {
+      rtc::scoped_refptr<I420BufferInterface> frameBuffer =
       static_cast<I420BufferInterface*>(frame.video_frame_buffer().get());
 
   if (SUCCEEDED(hr)) {
+    //this could actually use IMF2DBuffer(2) instead of IMFMediaBuffer
+    //docs say it may be more optimized
+    //if I understand right, we only write to that buffer and then create a sample out of it.
+    //the write happens in that libyuv conversion method...that should actually respect stride, so we
+    //could try this out...yuv stride could be fucked up tho, here's info: https://docs.microsoft.com/en-us/windows/desktop/medfound/image-stride
     auto totalSize = frameBuffer->StrideY() * frameBuffer->height() +
       frameBuffer->StrideU() * (frameBuffer->height() + 1) / 2 +
       frameBuffer->StrideV() * (frameBuffer->height() + 1) / 2;
 
-    ComPtr<IMFMediaBuffer> mediaBuffer;
-    ON_SUCCEEDED(MFCreateMemoryBuffer(totalSize, mediaBuffer.GetAddressOf()));
+      ComPtr<IMFMediaBuffer> mediaBuffer;
+      ComPtr<IMF2DBuffer> sp2DBuffer;
 
-    BYTE* destBuffer = nullptr;
-    if (SUCCEEDED(hr)) {
-      DWORD cbMaxLength;
-      DWORD cbCurrentLength;
-      ON_SUCCEEDED(mediaBuffer->Lock(
-        &destBuffer, &cbMaxLength, &cbCurrentLength));
-    }
+      ON_SUCCEEDED(MFCreateMemoryBuffer(totalSize, mediaBuffer.GetAddressOf()));
+      ON_SUCCEEDED(mediaBuffer.As(&sp2DBuffer));
 
-    if (SUCCEEDED(hr)) {
-      BYTE* destUV = destBuffer +
-        (frameBuffer->StrideY() * frameBuffer->height());
-      libyuv::I420ToNV12(
-        frameBuffer->DataY(), frameBuffer->StrideY(),
-        frameBuffer->DataU(), frameBuffer->StrideU(),
-        frameBuffer->DataV(), frameBuffer->StrideV(),
-        destBuffer, frameBuffer->StrideY(),
-        destUV, frameBuffer->StrideY(),
-        frameBuffer->width(),
-        frameBuffer->height());
-    }
-
-    {
-      if (frameBuffer->width() != (int)currentWidth_ || frameBuffer->height() != (int)currentHeight_) {
-        EncodedImageCallback* tempCallback = encodedCompleteCallback_;
-        Release();
-        {
-          rtc::CritScope lock(&callbackCrit_);
-          encodedCompleteCallback_ = tempCallback;
-        }
-
-        currentWidth_ = frameBuffer->width();
-        currentHeight_ = frameBuffer->height();
-        InitEncoderWithSettings(&codec_);
-        RTC_LOG(LS_WARNING) << "Resolution changed to: " << frameBuffer->width() << "x" << frameBuffer->height();
+      BYTE* destBuffer = nullptr;
+      if (SUCCEEDED(hr)) {
+        DWORD cbMaxLength;
+        DWORD cbCurrentLength;
+        ON_SUCCEEDED(mediaBuffer->Lock(
+          &destBuffer, &cbMaxLength, &cbCurrentLength));
       }
-    }
 
-    if (firstFrame_) {
-      firstFrame_ = false;
-      startTime_ = frame.timestamp();
-    }
+      if (SUCCEEDED(hr)) {
+        BYTE* destUV = destBuffer +
+          (frameBuffer->StrideY() * frameBuffer->height());
+        libyuv::I420ToNV12(
+          frameBuffer->DataY(), frameBuffer->StrideY(),
+          frameBuffer->DataU(), frameBuffer->StrideU(),
+          frameBuffer->DataV(), frameBuffer->StrideV(),
+          destBuffer, frameBuffer->StrideY(),
+          destUV, frameBuffer->StrideY(),
+          frameBuffer->width(),
+          frameBuffer->height());
+      }
 
-    auto timestampHns = ((frame.timestamp() - startTime_) / 90) * 1000 * 10;
-    ON_SUCCEEDED(sample->SetSampleTime(timestampHns));
+      {
+        if (frameBuffer->width() != (int)currentWidth_ || frameBuffer->height() != (int)currentHeight_) {
+          //TODO: extract this to own method and call that instead since we need to do the same in directx case
+          EncodedImageCallback* tempCallback = encodedCompleteCallback_;
+          Release();
+          {
+            rtc::CritScope lock(&callbackCrit_);
+            encodedCompleteCallback_ = tempCallback;
+          }
 
-    if (SUCCEEDED(hr)) {
-      auto durationHns = timestampHns - lastTimestampHns_;
-      hr = sample->SetSampleDuration(durationHns);
-    }
+          currentWidth_ = frameBuffer->width();
+          currentHeight_ = frameBuffer->height();
+          InitEncoderWithSettings(&codec_);
+          RTC_LOG(LS_WARNING) << "Resolution changed to: " << frameBuffer->width() << "x" << frameBuffer->height();
+        }
+      }
 
-    if (SUCCEEDED(hr)) {
-      lastTimestampHns_ = timestampHns;
+      if (firstFrame_) {
+        firstFrame_ = false;
+        startTime_ = frame.timestamp();
+      }
 
-      // Cache the frame attributes to get them back after the encoding.
-      CachedFrameAttributes frameAttributes;
-      frameAttributes.timestamp = frame.timestamp();
-      frameAttributes.ntpTime = frame.ntp_time_ms();
-      frameAttributes.captureRenderTime = frame.render_time_ms();
-      frameAttributes.frameWidth = frame.width();
-      frameAttributes.frameHeight = frame.height();
-      _sampleAttributeQueue.push(timestampHns, frameAttributes);
-    }
+      auto timestampHns = ((frame.timestamp() - startTime_) / 90) * 1000 * 10;
+      ON_SUCCEEDED(sample->SetSampleTime(timestampHns));
 
-    ON_SUCCEEDED(mediaBuffer->SetCurrentLength(
-      frameBuffer->width() * frameBuffer->height() * 3 / 2));
+      if (SUCCEEDED(hr)) {
+        auto durationHns = timestampHns - lastTimestampHns_;
+        hr = sample->SetSampleDuration(durationHns);
+      }
 
-    if (destBuffer != nullptr) {
-      mediaBuffer->Unlock();
-    }
+      if (SUCCEEDED(hr)) {
+        lastTimestampHns_ = timestampHns;
 
-    ON_SUCCEEDED(sample->AddBuffer(mediaBuffer.Get()));
+        // Cache the frame attributes to get them back after the encoding.
+        CachedFrameAttributes frameAttributes;
+        frameAttributes.timestamp = frame.timestamp();
+        frameAttributes.ntpTime = frame.ntp_time_ms();
+        frameAttributes.captureRenderTime = frame.render_time_ms();
+        frameAttributes.frameWidth = frame.width();
+        frameAttributes.frameHeight = frame.height();
+        _sampleAttributeQueue.push(timestampHns, frameAttributes);
+      }
 
-    if (lastFrameDropped_) {
-      lastFrameDropped_ = false;
-      sampleAttributes->SetUINT32(MFSampleExtension_Discontinuity, TRUE);
+      ON_SUCCEEDED(mediaBuffer->SetCurrentLength(
+        frameBuffer->width() * frameBuffer->height() * 3 / 2));
+
+      if (destBuffer != nullptr) {
+        mediaBuffer->Unlock();
+      }
+
+      ON_SUCCEEDED(sample->AddBuffer(mediaBuffer.Get()));
+
+      if (lastFrameDropped_) {
+        lastFrameDropped_ = false;
+        sampleAttributes->SetUINT32(MFSampleExtension_Discontinuity, TRUE);
+      }
     }
   }
 
@@ -338,6 +407,9 @@ void WinUWPH264EncoderImpl::OnH264Encoded(ComPtr<IMFSample> sample) {
   DWORD totalLength;
   HRESULT hr = S_OK;
   ON_SUCCEEDED(sample->GetTotalLength(&totalLength));
+
+  //TODO: special case/QueryInterface chain if we are in directx mode,
+  //could be done in extra method for readability
 
   ComPtr<IMFMediaBuffer> buffer;
   hr = sample->GetBufferByIndex(0, &buffer);
