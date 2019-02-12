@@ -11,6 +11,7 @@
 #ifndef THIRD_PARTY_H264_WINUWP_H264ENCODER_H264ENCODER_H_
 #define THIRD_PARTY_H264_WINUWP_H264ENCODER_H264ENCODER_H_
 
+#include <d3d11.h>
 #include <mfapi.h>
 #include <mfidl.h>
 #include <Mfreadwrite.h>
@@ -34,8 +35,7 @@ class H264MediaSink;
 
 class WinUWPH264EncoderImpl : public VideoEncoder, public IH264EncodingCallback {
  public:
-  //this needs an extra ID3D11Device arg so we can create the IMFDXGIManager
-  WinUWPH264EncoderImpl();
+  WinUWPH264EncoderImpl(ID3D11Device* device);
 
   ~WinUWPH264EncoderImpl();
 
@@ -85,6 +85,9 @@ class WinUWPH264EncoderImpl : public VideoEncoder, public IH264EncodingCallback 
   UINT32 currentFps_ {};
   int64_t lastTimeSettingsChanged_ {};
 
+  //TODO: probably also need ID3D11Device here because the constructor isn't actually doing anything
+  //useful. And a setter should we lose the device or something. Or we could just fall back to SW in that
+  //case for now.
   ComPtr<IMFDXGIDeviceManager> spDxgiDeviceManager_;
   UINT resetToken_ = 0;
 

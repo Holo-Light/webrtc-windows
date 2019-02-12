@@ -12,6 +12,8 @@
 #define THIRD_PARTY_H264_WINUWP_H264_WINUWP_FACTORY_H_
 
 #include <vector>
+#include <d3d11.h>
+#include <wrl\client.h>
 #include "media/engine/webrtcvideoencoderfactory.h"
 #include "media/engine/webrtcvideodecoderfactory.h"
 #include "media/base/codec.h"
@@ -19,30 +21,35 @@
 
 namespace webrtc {
 
-class WinUWPH264EncoderFactory : public cricket::WebRtcVideoEncoderFactory {
- public:
-  WinUWPH264EncoderFactory();
+// class WinUWPH264EncoderFactory : public cricket::WebRtcVideoEncoderFactory {
+//  public:
+//   WinUWPH264EncoderFactory();
 
-  webrtc::VideoEncoder* CreateVideoEncoder(const cricket::VideoCodec& codec)
-    override;
+//   webrtc::VideoEncoder* CreateVideoEncoder(const cricket::VideoCodec& codec)
+//     override;
 
-  const std::vector<cricket::VideoCodec>& supported_codecs()
-    const override;
+//   const std::vector<cricket::VideoCodec>& supported_codecs()
+//     const override;
 
-  void DestroyVideoEncoder(webrtc::VideoEncoder* encoder) override;
+//   void DestroyVideoEncoder(webrtc::VideoEncoder* encoder) override;
 
- private:
-  std::vector<cricket::VideoCodec> codecList_;
-};
+//  private:
+//   std::vector<cricket::VideoCodec> codecList_;
+// };
 
 class WinUWPH264EncoderFactoryNew : public VideoEncoderFactory {
  public:
+  WinUWPH264EncoderFactoryNew(ID3D11Device* device);
   std::vector<SdpVideoFormat> GetSupportedFormats() const override;
 
   CodecInfo QueryVideoEncoder(const SdpVideoFormat& format) const override;
 
   std::unique_ptr<VideoEncoder> CreateVideoEncoder(
       const SdpVideoFormat& format) override;
+
+  private:
+  //we need this to enable the encoder to use a d3d device
+  Microsoft::WRL::ComPtr<ID3D11Device> d3d_device_;
 };
 
 class WinUWPH264DecoderFactory : public cricket::WebRtcVideoDecoderFactory {

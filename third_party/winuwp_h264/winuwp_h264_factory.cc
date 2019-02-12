@@ -18,32 +18,32 @@
 
 namespace webrtc {
 
-  WinUWPH264EncoderFactory::WinUWPH264EncoderFactory() {
-    codecList_ =
-      std::vector<cricket::VideoCodec> {
-        cricket::VideoCodec("H264")
-    };
-  }
+  // WinUWPH264EncoderFactory::WinUWPH264EncoderFactory() {
+  //   codecList_ =
+  //     std::vector<cricket::VideoCodec> {
+  //       cricket::VideoCodec("H264")
+  //   };
+  // }
 
-  webrtc::VideoEncoder* WinUWPH264EncoderFactory::CreateVideoEncoder(
-    const cricket::VideoCodec& codec) {
-    if (codec.name == "H264") {
-      return new WinUWPH264EncoderImpl();
-    } else {
-      return nullptr;
-    }
-  }
+  // webrtc::VideoEncoder* WinUWPH264EncoderFactory::CreateVideoEncoder(
+  //   const cricket::VideoCodec& codec) {
+  //   if (codec.name == "H264") {
+  //     return new WinUWPH264EncoderImpl();
+  //   } else {
+  //     return nullptr;
+  //   }
+  // }
 
-  const std::vector<cricket::VideoCodec>&
-    WinUWPH264EncoderFactory::supported_codecs() const {
-    return codecList_;
-  }
+  // const std::vector<cricket::VideoCodec>&
+  //   WinUWPH264EncoderFactory::supported_codecs() const {
+  //   return codecList_;
+  // }
 
-  void WinUWPH264EncoderFactory::DestroyVideoEncoder(
-    webrtc::VideoEncoder* encoder) {
-      encoder->Release();
-      delete encoder;
-  }
+  // void WinUWPH264EncoderFactory::DestroyVideoEncoder(
+  //   webrtc::VideoEncoder* encoder) {
+  //     encoder->Release();
+  //     delete encoder;
+  // }
 
 
   webrtc::VideoDecoder* WinUWPH264DecoderFactory::CreateVideoDecoder(
@@ -59,6 +59,10 @@ namespace webrtc {
     webrtc::VideoDecoder* decoder) {
     decoder->Release();
     delete decoder;
+  }
+
+  WinUWPH264EncoderFactoryNew::WinUWPH264EncoderFactoryNew(ID3D11Device* device) {
+    d3d_device_ = device;
   }
 
   std::vector<SdpVideoFormat> WinUWPH264EncoderFactoryNew::GetSupportedFormats()
@@ -80,7 +84,7 @@ namespace webrtc {
   std::unique_ptr<VideoEncoder> WinUWPH264EncoderFactoryNew::CreateVideoEncoder(
     const SdpVideoFormat& format) {
     if (cricket::CodecNamesEq(format.name, cricket::kH264CodecName)) {
-      return std::make_unique<WinUWPH264EncoderImpl>();
+      return std::make_unique<WinUWPH264EncoderImpl>(d3d_device_.Get());
     }
 
     RTC_LOG(LS_ERROR) << "Trying to create encoder of unsupported format "

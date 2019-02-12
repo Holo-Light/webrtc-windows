@@ -51,8 +51,17 @@ static const int kHighH264QpThreshold = 37;
 // H264 WinUWP Encoder Implementation
 //////////////////////////////////////////
 
-WinUWPH264EncoderImpl::WinUWPH264EncoderImpl()
+WinUWPH264EncoderImpl::WinUWPH264EncoderImpl(ID3D11Device* device)
 {
+  HRESULT hr = S_OK;
+  MFCreateDXGIDeviceManager(&resetToken_, &spDxgiDeviceManager_);
+  if FAILED(hr) {
+    RTC_LOG(LS_ERROR) << "Failed to create DXGI device manager";
+  }
+  hr = spDxgiDeviceManager_->ResetDevice(static_cast<IUnknown*>(device), resetToken_);
+  if FAILED(hr) {
+    RTC_LOG(LS_ERROR) << "DXGI manager failed to reset device";
+  }
 }
 
 WinUWPH264EncoderImpl::~WinUWPH264EncoderImpl() {
@@ -228,13 +237,6 @@ ComPtr<IMFSample> WinUWPH264EncoderImpl::FromVideoFrame(const VideoFrame& frame)
           frameAttributes.frameHeight = frame.height();
           _sampleAttributeQueue.push(timestampHns, frameAttributes);
         }
-
-        // ON_SUCCEEDED(mediaBuffer->SetCurrentLength(
-        //   frameBuffer->width() * frameBuffer->height() * 3 / 2));
-
-        // if (destBuffer != nullptr) {
-        //   mediaBuffer->Unlock();
-        // }
 
         ON_SUCCEEDED(sample->AddBuffer(spMediaBuffer.Get()));
 
