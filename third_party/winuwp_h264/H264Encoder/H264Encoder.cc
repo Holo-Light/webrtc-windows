@@ -56,12 +56,14 @@ WinUWPH264EncoderImpl::WinUWPH264EncoderImpl(ID3D11Device* device)
   HRESULT hr = S_OK;
   MFCreateDXGIDeviceManager(&resetToken_, &spDxgiDeviceManager_);
   if FAILED(hr) {
-    RTC_LOG(LS_ERROR) << "Failed to create DXGI device manager";
+    RTC_LOG_GLE_EX(LS_ERROR, hr) << "Failed to create DXGI device manager";
   }
   hr = spDxgiDeviceManager_->ResetDevice(static_cast<IUnknown*>(device), resetToken_);
   if FAILED(hr) {
-    RTC_LOG(LS_ERROR) << "DXGI manager failed to reset device";
+    RTC_LOG_GLE_EX(LS_ERROR, hr) << "DXGI manager failed to reset device";
   }
+  hr = spDxgiDeviceManager_->OpenDeviceHandle(&deviceHandle_);
+  if (FAILED(hr)) RTC_LOG_GLE_EX(LS_ERROR, hr) << "Failed to open DXGI device handle";
 }
 
 WinUWPH264EncoderImpl::~WinUWPH264EncoderImpl() {
@@ -118,17 +120,39 @@ int WinUWPH264EncoderImpl::InitEncoderWithSettings(const VideoCodec* inst) {
   ON_SUCCEEDED(MFSetAttributeRatio(mediaTypeIn.Get(),
     MF_MT_FRAME_RATE, currentFps_, 1));
 
+  ComPtr<IUnknown> unknown;
+  ComPtr<ID3D11Device> device;
+  ON_SUCCEEDED(spDxgiDeviceManager_->LockDevice(deviceHandle_, IID_ID3D11Device, &unknown, true));
+  ON_SUCCEEDED(unknown.As(&device));
+
+  D3D11_TEXTURE2D_DESC stagingDesc = {};
+  stagingDesc.ArraySize = 1;
+  stagingDesc.BindFlags = 0;
+  stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+  stagingDesc.Format = DXGI_FORMAT_NV12;
+  stagingDesc.Height = currentHeight_;
+  stagingDesc.MipLevels = 1;
+  stagingDesc.MiscFlags = 0;
+  stagingDesc.SampleDesc = DXGI_SAMPLE_DESC { 1, 0 };
+  stagingDesc.Usage = D3D11_USAGE_STAGING;
+  stagingDesc.Width = currentWidth_;
+  
+  ON_SUCCEEDED(device->CreateTexture2D(&stagingDesc, nullptr, &stagingTexture_));
+  ON_SUCCEEDED(spDxgiDeviceManager_->UnlockDevice(deviceHandle_, false));
+
   // Create the media sink
   ON_SUCCEEDED(Microsoft::WRL::MakeAndInitialize<H264MediaSink>(&mediaSink_));
 
   // SinkWriter creation attributes
-  ON_SUCCEEDED(MFCreateAttributes(&sinkWriterCreationAttributes_, 1));
+  ON_SUCCEEDED(MFCreateAttributes(&sinkWriterCreationAttributes_, 4));
   ON_SUCCEEDED(sinkWriterCreationAttributes_->SetUINT32(
     MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE));
   ON_SUCCEEDED(sinkWriterCreationAttributes_->SetUINT32(
     MF_SINK_WRITER_DISABLE_THROTTLING, TRUE));
   ON_SUCCEEDED(sinkWriterCreationAttributes_->SetUINT32(
     MF_LOW_LATENCY, TRUE));
+  ON_SUCCEEDED(sinkWriterCreationAttributes_->SetUnknown(
+    MF_SINK_WRITER_D3D_MANAGER, static_cast<IUnknown*>(spDxgiDeviceManager_.Get())));
 
   // Create the sink writer
   ON_SUCCEEDED(MFCreateSinkWriterFromMediaSink(mediaSink_.Get(),
@@ -205,12 +229,14 @@ ComPtr<IMFSample> WinUWPH264EncoderImpl::FromVideoFrame(const VideoFrame& frame)
   //this needs to distinguish between i420 and native buffers,
   //otherwise it'll just crash
   if (frame.video_frame_buffer().get()->type() == VideoFrameBuffer::Type::kNative) {
-    //do directx stuff here, i.e. cast to D3D11VideoFrameBuffer, get texture pointer and create sample from that
     rtc::scoped_refptr<hololight::D3D11VideoFrameBuffer> frameBuffer = static_cast<hololight::D3D11VideoFrameBuffer*>(frame.video_frame_buffer().get());
     ComPtr<ID3D11Texture2D> backingTexture = frameBuffer->GetBackingTexture();
     ComPtr<IUnknown> spUnkTexture;
     ComPtr<IMFMediaBuffer> spMediaBuffer;
     hr = backingTexture.As(&spUnkTexture);
+
+    D3D11_TEXTURE2D_DESC textureDesc;
+    backingTexture->GetDesc(&textureDesc);
 
     if (SUCCEEDED(hr)) {
       hr = MFCreateDXGISurfaceBuffer(IID_ID3D11Texture2D, spUnkTexture.Get(), 0, FALSE, &spMediaBuffer);
@@ -238,6 +264,9 @@ ComPtr<IMFSample> WinUWPH264EncoderImpl::FromVideoFrame(const VideoFrame& frame)
           _sampleAttributeQueue.push(timestampHns, frameAttributes);
         }
 
+        ON_SUCCEEDED(spMediaBuffer->SetCurrentLength(
+        frameBuffer->width() * frameBuffer->height() * 3 / 2));
+
         ON_SUCCEEDED(sample->AddBuffer(spMediaBuffer.Get()));
 
         if (lastFrameDropped_) {
@@ -247,106 +276,104 @@ ComPtr<IMFSample> WinUWPH264EncoderImpl::FromVideoFrame(const VideoFrame& frame)
         //end TODO
       }
     }
-
-    
   } else {
       rtc::scoped_refptr<I420BufferInterface> frameBuffer =
       static_cast<I420BufferInterface*>(frame.video_frame_buffer().get());
 
-  if (SUCCEEDED(hr)) {
-    //this could actually use IMF2DBuffer(2) instead of IMFMediaBuffer
-    //docs say it may be more optimized
-    //if I understand right, we only write to that buffer and then create a sample out of it.
-    //the write happens in that libyuv conversion method...that should actually respect stride, so we
-    //could try this out...yuv stride could be fucked up tho, here's info: https://docs.microsoft.com/en-us/windows/desktop/medfound/image-stride
-    auto totalSize = frameBuffer->StrideY() * frameBuffer->height() +
-      frameBuffer->StrideU() * (frameBuffer->height() + 1) / 2 +
-      frameBuffer->StrideV() * (frameBuffer->height() + 1) / 2;
+    if (SUCCEEDED(hr)) {
+      //this could actually use IMF2DBuffer(2) instead of IMFMediaBuffer
+      //docs say it may be more optimized
+      //if I understand right, we only write to that buffer and then create a sample out of it.
+      //the write happens in that libyuv conversion method...that should actually respect stride, so we
+      //could try this out...yuv stride could be fucked up tho, here's info: https://docs.microsoft.com/en-us/windows/desktop/medfound/image-stride
+      auto totalSize = frameBuffer->StrideY() * frameBuffer->height() +
+        frameBuffer->StrideU() * (frameBuffer->height() + 1) / 2 +
+        frameBuffer->StrideV() * (frameBuffer->height() + 1) / 2;
 
-      ComPtr<IMFMediaBuffer> mediaBuffer;
-      ComPtr<IMF2DBuffer> sp2DBuffer;
+        ComPtr<IMFMediaBuffer> mediaBuffer;
+        // ComPtr<IMF2DBuffer> sp2DBuffer;
 
-      ON_SUCCEEDED(MFCreateMemoryBuffer(totalSize, mediaBuffer.GetAddressOf()));
-      ON_SUCCEEDED(mediaBuffer.As(&sp2DBuffer));
+        ON_SUCCEEDED(MFCreateMemoryBuffer(totalSize, mediaBuffer.GetAddressOf()));
+        // ON_SUCCEEDED(mediaBuffer.As(&sp2DBuffer));
 
-      BYTE* destBuffer = nullptr;
-      if (SUCCEEDED(hr)) {
-        DWORD cbMaxLength;
-        DWORD cbCurrentLength;
-        ON_SUCCEEDED(mediaBuffer->Lock(
-          &destBuffer, &cbMaxLength, &cbCurrentLength));
-      }
+        BYTE* destBuffer = nullptr;
+        if (SUCCEEDED(hr)) {
+          DWORD cbMaxLength;
+          DWORD cbCurrentLength;
+          ON_SUCCEEDED(mediaBuffer->Lock(
+            &destBuffer, &cbMaxLength, &cbCurrentLength));
+        }
 
-      if (SUCCEEDED(hr)) {
-        BYTE* destUV = destBuffer +
-          (frameBuffer->StrideY() * frameBuffer->height());
-        libyuv::I420ToNV12(
-          frameBuffer->DataY(), frameBuffer->StrideY(),
-          frameBuffer->DataU(), frameBuffer->StrideU(),
-          frameBuffer->DataV(), frameBuffer->StrideV(),
-          destBuffer, frameBuffer->StrideY(),
-          destUV, frameBuffer->StrideY(),
-          frameBuffer->width(),
-          frameBuffer->height());
-      }
+        if (SUCCEEDED(hr)) {
+          BYTE* destUV = destBuffer +
+            (frameBuffer->StrideY() * frameBuffer->height());
+          libyuv::I420ToNV12(
+            frameBuffer->DataY(), frameBuffer->StrideY(),
+            frameBuffer->DataU(), frameBuffer->StrideU(),
+            frameBuffer->DataV(), frameBuffer->StrideV(),
+            destBuffer, frameBuffer->StrideY(),
+            destUV, frameBuffer->StrideY(),
+            frameBuffer->width(),
+            frameBuffer->height());
+        }
 
-      {
-        if (frameBuffer->width() != (int)currentWidth_ || frameBuffer->height() != (int)currentHeight_) {
-          //TODO: extract this to own method and call that instead since we need to do the same in directx case
-          EncodedImageCallback* tempCallback = encodedCompleteCallback_;
-          Release();
-          {
-            rtc::CritScope lock(&callbackCrit_);
-            encodedCompleteCallback_ = tempCallback;
+        {
+          if (frameBuffer->width() != (int)currentWidth_ || frameBuffer->height() != (int)currentHeight_) {
+            //TODO: extract this to own method and call that instead since we need to do the same in directx case
+            EncodedImageCallback* tempCallback = encodedCompleteCallback_;
+            Release();
+            {
+              rtc::CritScope lock(&callbackCrit_);
+              encodedCompleteCallback_ = tempCallback;
+            }
+
+            currentWidth_ = frameBuffer->width();
+            currentHeight_ = frameBuffer->height();
+            InitEncoderWithSettings(&codec_);
+            RTC_LOG(LS_WARNING) << "Resolution changed to: " << frameBuffer->width() << "x" << frameBuffer->height();
           }
+        }
 
-          currentWidth_ = frameBuffer->width();
-          currentHeight_ = frameBuffer->height();
-          InitEncoderWithSettings(&codec_);
-          RTC_LOG(LS_WARNING) << "Resolution changed to: " << frameBuffer->width() << "x" << frameBuffer->height();
+        if (firstFrame_) {
+          firstFrame_ = false;
+          startTime_ = frame.timestamp();
+        }
+
+        auto timestampHns = ((frame.timestamp() - startTime_) / 90) * 1000 * 10;
+        ON_SUCCEEDED(sample->SetSampleTime(timestampHns));
+
+        if (SUCCEEDED(hr)) {
+          auto durationHns = timestampHns - lastTimestampHns_;
+          hr = sample->SetSampleDuration(durationHns);
+        }
+
+        if (SUCCEEDED(hr)) {
+          lastTimestampHns_ = timestampHns;
+
+          // Cache the frame attributes to get them back after the encoding.
+          CachedFrameAttributes frameAttributes;
+          frameAttributes.timestamp = frame.timestamp();
+          frameAttributes.ntpTime = frame.ntp_time_ms();
+          frameAttributes.captureRenderTime = frame.render_time_ms();
+          frameAttributes.frameWidth = frame.width();
+          frameAttributes.frameHeight = frame.height();
+          _sampleAttributeQueue.push(timestampHns, frameAttributes);
+        }
+
+        ON_SUCCEEDED(mediaBuffer->SetCurrentLength(
+          frameBuffer->width() * frameBuffer->height() * 3 / 2));
+
+        if (destBuffer != nullptr) {
+          mediaBuffer->Unlock();
+        }
+
+        ON_SUCCEEDED(sample->AddBuffer(mediaBuffer.Get()));
+
+        if (lastFrameDropped_) {
+          lastFrameDropped_ = false;
+          sampleAttributes->SetUINT32(MFSampleExtension_Discontinuity, TRUE);
         }
       }
-
-      if (firstFrame_) {
-        firstFrame_ = false;
-        startTime_ = frame.timestamp();
-      }
-
-      auto timestampHns = ((frame.timestamp() - startTime_) / 90) * 1000 * 10;
-      ON_SUCCEEDED(sample->SetSampleTime(timestampHns));
-
-      if (SUCCEEDED(hr)) {
-        auto durationHns = timestampHns - lastTimestampHns_;
-        hr = sample->SetSampleDuration(durationHns);
-      }
-
-      if (SUCCEEDED(hr)) {
-        lastTimestampHns_ = timestampHns;
-
-        // Cache the frame attributes to get them back after the encoding.
-        CachedFrameAttributes frameAttributes;
-        frameAttributes.timestamp = frame.timestamp();
-        frameAttributes.ntpTime = frame.ntp_time_ms();
-        frameAttributes.captureRenderTime = frame.render_time_ms();
-        frameAttributes.frameWidth = frame.width();
-        frameAttributes.frameHeight = frame.height();
-        _sampleAttributeQueue.push(timestampHns, frameAttributes);
-      }
-
-      ON_SUCCEEDED(mediaBuffer->SetCurrentLength(
-        frameBuffer->width() * frameBuffer->height() * 3 / 2));
-
-      if (destBuffer != nullptr) {
-        mediaBuffer->Unlock();
-      }
-
-      ON_SUCCEEDED(sample->AddBuffer(mediaBuffer.Get()));
-
-      if (lastFrameDropped_) {
-        lastFrameDropped_ = false;
-        sampleAttributes->SetUINT32(MFSampleExtension_Discontinuity, TRUE);
-      }
-    }
   }
 
   return sample;
@@ -383,6 +410,9 @@ int WinUWPH264EncoderImpl::Encode(
 
   codecSpecificInfo_ = codec_specific_info;
 
+  ComPtr<ID3D11Device> device;
+  ComPtr<IUnknown> unknown;
+  spDxgiDeviceManager_->LockDevice(deviceHandle_, IID_ID3D11Device, reinterpret_cast<void**>(unknown.GetAddressOf()), TRUE);
   ComPtr<IMFSample> sample;
   {
     rtc::CritScope lock(&crit_);
@@ -401,6 +431,8 @@ int WinUWPH264EncoderImpl::Encode(
     ON_SUCCEEDED(sinkWriter_->NotifyEndOfSegment(streamIndex_));
   }
 
+  spDxgiDeviceManager_->UnlockDevice(deviceHandle_, 0);
+
   ++framePendingCount_;
   return WEBRTC_VIDEO_CODEC_OK;
 }
@@ -410,128 +442,125 @@ void WinUWPH264EncoderImpl::OnH264Encoded(ComPtr<IMFSample> sample) {
   HRESULT hr = S_OK;
   ON_SUCCEEDED(sample->GetTotalLength(&totalLength));
 
-  //TODO: special case/QueryInterface chain if we are in directx mode,
-  //could be done in extra method for readability
-
   ComPtr<IMFMediaBuffer> buffer;
   hr = sample->GetBufferByIndex(0, &buffer);
+  
+  std::vector<byte> sendBuffer;
+  DWORD curLength = 0;
+  BYTE* byteBuffer;
+  DWORD maxLength;
+  
+  hr = buffer->Lock(&byteBuffer, &maxLength, &curLength);
+  if (FAILED(hr)) {
+    RTC_LOG_GLE_EX(LS_ERROR, hr) << "Failed to lock IMFMediaBuffer";
+    return;
+  }
+  if (curLength == 0) {
+    RTC_LOG(LS_WARNING) << "Got empty sample.";
+    buffer->Unlock();
+    return;
+  }
+  
+  sendBuffer.resize(curLength);
+  memcpy(sendBuffer.data(), byteBuffer, curLength);
+  hr = buffer->Unlock();
+  if (FAILED(hr)) {
+    return;
+  }
 
+  // sendBuffer is not copied here.
+  EncodedImage encodedImage(sendBuffer.data(), curLength, curLength);
+
+  ComPtr<IMFAttributes> sampleAttributes;
+  hr = sample.As(&sampleAttributes);
   if (SUCCEEDED(hr)) {
-    BYTE* byteBuffer;
-    DWORD maxLength;
-    DWORD curLength;
-    hr = buffer->Lock(&byteBuffer, &maxLength, &curLength);
-    if (FAILED(hr)) {
+    UINT32 cleanPoint;
+    hr = sampleAttributes->GetUINT32(
+      MFSampleExtension_CleanPoint, &cleanPoint);
+    if (SUCCEEDED(hr) && cleanPoint) {
+      encodedImage._completeFrame = true;
+      encodedImage._frameType = kVideoFrameKey;
+    }
+  }
+
+  // Scan for and create mark all fragments.
+  RTPFragmentationHeader fragmentationHeader;
+  uint32_t fragIdx = 0;
+  for (uint32_t i = 0; i < sendBuffer.size() - 5; ++i) {
+    byte* ptr = sendBuffer.data() + i;
+    int prefixLengthFound = 0;
+    if (ptr[0] == 0x00 && ptr[1] == 0x00 && ptr[2] == 0x00 && ptr[3] == 0x01
+      && ((ptr[4] & 0x1f) != 0x09 /* ignore access unit delimiters */)) {
+      prefixLengthFound = 4;
+    } else if (ptr[0] == 0x00 && ptr[1] == 0x00 && ptr[2] == 0x01
+      && ((ptr[3] & 0x1f) != 0x09 /* ignore access unit delimiters */)) {
+      prefixLengthFound = 3;
+    }
+
+    // Found a key frame, mark is as such in case
+    // MFSampleExtension_CleanPoint wasn't set on the sample.
+    if (prefixLengthFound > 0 && (ptr[prefixLengthFound] & 0x1f) == 0x05) {
+      encodedImage._completeFrame = true;
+      encodedImage._frameType = kVideoFrameKey;
+    }
+
+    if (prefixLengthFound > 0) {
+      fragmentationHeader.VerifyAndAllocateFragmentationHeader(fragIdx + 1);
+      fragmentationHeader.fragmentationOffset[fragIdx] = i + prefixLengthFound;
+      fragmentationHeader.fragmentationLength[fragIdx] = 0;  // We'll set that later
+      // Set the length of the previous fragment.
+      if (fragIdx > 0) {
+        fragmentationHeader.fragmentationLength[fragIdx - 1] =
+          i - fragmentationHeader.fragmentationOffset[fragIdx - 1];
+      }
+      fragmentationHeader.fragmentationPlType[fragIdx] = 0;
+      fragmentationHeader.fragmentationTimeDiff[fragIdx] = 0;
+      ++fragIdx;
+      i += 5;
+    }
+  }
+  // Set the length of the last fragment.
+  if (fragIdx > 0) {
+    fragmentationHeader.fragmentationLength[fragIdx - 1] =
+      sendBuffer.size() -
+      fragmentationHeader.fragmentationOffset[fragIdx - 1];
+  }
+
+  {
+    rtc::CritScope lock(&callbackCrit_);
+    --framePendingCount_;
+    if (encodedCompleteCallback_ == nullptr) {
       return;
     }
-    if (curLength == 0) {
-      RTC_LOG(LS_WARNING) << "Got empty sample.";
-      buffer->Unlock();
+
+    LONGLONG sampleTimestamp;
+    sample->GetSampleTime(&sampleTimestamp);
+
+    CachedFrameAttributes frameAttributes;
+    if (_sampleAttributeQueue.pop(sampleTimestamp, frameAttributes)) {
+      encodedImage.SetTimestamp(frameAttributes.timestamp);
+      encodedImage.ntp_time_ms_ = frameAttributes.ntpTime;
+      encodedImage.capture_time_ms_ = frameAttributes.captureRenderTime;
+      encodedImage._encodedWidth = frameAttributes.frameWidth;
+      encodedImage._encodedHeight = frameAttributes.frameHeight;
+    }
+    else {
+      // No point in confusing the callback with a frame that doesn't
+      // have correct attributes.
       return;
     }
-    std::vector<byte> sendBuffer;
-    sendBuffer.resize(curLength);
-    memcpy(sendBuffer.data(), byteBuffer, curLength);
-    hr = buffer->Unlock();
-    if (FAILED(hr)) {
-      return;
-    }
 
-    // sendBuffer is not copied here.
-    EncodedImage encodedImage(sendBuffer.data(), curLength, curLength);
-
-    ComPtr<IMFAttributes> sampleAttributes;
-    hr = sample.As(&sampleAttributes);
-    if (SUCCEEDED(hr)) {
-      UINT32 cleanPoint;
-      hr = sampleAttributes->GetUINT32(
-        MFSampleExtension_CleanPoint, &cleanPoint);
-      if (SUCCEEDED(hr) && cleanPoint) {
-        encodedImage._completeFrame = true;
-        encodedImage._frameType = kVideoFrameKey;
-      }
-    }
-
-    // Scan for and create mark all fragments.
-    RTPFragmentationHeader fragmentationHeader;
-    uint32_t fragIdx = 0;
-    for (uint32_t i = 0; i < sendBuffer.size() - 5; ++i) {
-      byte* ptr = sendBuffer.data() + i;
-      int prefixLengthFound = 0;
-      if (ptr[0] == 0x00 && ptr[1] == 0x00 && ptr[2] == 0x00 && ptr[3] == 0x01
-        && ((ptr[4] & 0x1f) != 0x09 /* ignore access unit delimiters */)) {
-        prefixLengthFound = 4;
-      } else if (ptr[0] == 0x00 && ptr[1] == 0x00 && ptr[2] == 0x01
-        && ((ptr[3] & 0x1f) != 0x09 /* ignore access unit delimiters */)) {
-        prefixLengthFound = 3;
-      }
-
-      // Found a key frame, mark is as such in case
-      // MFSampleExtension_CleanPoint wasn't set on the sample.
-      if (prefixLengthFound > 0 && (ptr[prefixLengthFound] & 0x1f) == 0x05) {
-        encodedImage._completeFrame = true;
-        encodedImage._frameType = kVideoFrameKey;
-      }
-
-      if (prefixLengthFound > 0) {
-        fragmentationHeader.VerifyAndAllocateFragmentationHeader(fragIdx + 1);
-        fragmentationHeader.fragmentationOffset[fragIdx] = i + prefixLengthFound;
-        fragmentationHeader.fragmentationLength[fragIdx] = 0;  // We'll set that later
-        // Set the length of the previous fragment.
-        if (fragIdx > 0) {
-          fragmentationHeader.fragmentationLength[fragIdx - 1] =
-            i - fragmentationHeader.fragmentationOffset[fragIdx - 1];
-        }
-        fragmentationHeader.fragmentationPlType[fragIdx] = 0;
-        fragmentationHeader.fragmentationTimeDiff[fragIdx] = 0;
-        ++fragIdx;
-        i += 5;
-      }
-    }
-    // Set the length of the last fragment.
-    if (fragIdx > 0) {
-      fragmentationHeader.fragmentationLength[fragIdx - 1] =
-        sendBuffer.size() -
-        fragmentationHeader.fragmentationOffset[fragIdx - 1];
-    }
-
-    {
-      rtc::CritScope lock(&callbackCrit_);
-      --framePendingCount_;
-      if (encodedCompleteCallback_ == nullptr) {
-        return;
-      }
-
-      LONGLONG sampleTimestamp;
-      sample->GetSampleTime(&sampleTimestamp);
-
-      CachedFrameAttributes frameAttributes;
-      if (_sampleAttributeQueue.pop(sampleTimestamp, frameAttributes)) {
-        encodedImage.SetTimestamp(frameAttributes.timestamp);
-        encodedImage.ntp_time_ms_ = frameAttributes.ntpTime;
-        encodedImage.capture_time_ms_ = frameAttributes.captureRenderTime;
-        encodedImage._encodedWidth = frameAttributes.frameWidth;
-        encodedImage._encodedHeight = frameAttributes.frameHeight;
+    if (encodedCompleteCallback_ != nullptr) {
+      CodecSpecificInfo codecSpecificInfo;
+      if (codecSpecificInfo_ != nullptr) {
+        codecSpecificInfo = *codecSpecificInfo_;
       }
       else {
-        // No point in confusing the callback with a frame that doesn't
-        // have correct attributes.
-        return;
-      }
-
-
-      if (encodedCompleteCallback_ != nullptr) {
-        CodecSpecificInfo codecSpecificInfo;
-        if (codecSpecificInfo_ != nullptr) {
-          codecSpecificInfo = *codecSpecificInfo_;
-        }
-        else {
-          codecSpecificInfo.codecType = webrtc::kVideoCodecH264;
-          codecSpecificInfo.codecSpecific.H264.packetization_mode =
-            H264PacketizationMode::NonInterleaved;
-          encodedCompleteCallback_->OnEncodedImage(
-            encodedImage, &codecSpecificInfo, &fragmentationHeader);
-        }
+        codecSpecificInfo.codecType = webrtc::kVideoCodecH264;
+        codecSpecificInfo.codecSpecific.H264.packetization_mode =
+          H264PacketizationMode::NonInterleaved;
+        encodedCompleteCallback_->OnEncodedImage(
+          encodedImage, &codecSpecificInfo, &fragmentationHeader);
       }
     }
   }

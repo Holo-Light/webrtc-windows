@@ -85,11 +85,10 @@ class WinUWPH264EncoderImpl : public VideoEncoder, public IH264EncodingCallback 
   UINT32 currentFps_ {};
   int64_t lastTimeSettingsChanged_ {};
 
-  //TODO: probably also need ID3D11Device here because the constructor isn't actually doing anything
-  //useful. And a setter should we lose the device or something. Or we could just fall back to SW in that
-  //case for now.
   ComPtr<IMFDXGIDeviceManager> spDxgiDeviceManager_;
+  HANDLE deviceHandle_;
   UINT resetToken_ = 0;
+  ComPtr<ID3D11Texture2D> stagingTexture_;
 
   struct CachedFrameAttributes {
     uint32_t timestamp;
