@@ -102,5 +102,37 @@ namespace webrtc {
     return nullptr;
   }
 
+  std::vector<SdpVideoFormat> WinUWPH264DecoderFactoryNew::GetSupportedFormats() const {
+    
+    // COPY-PASTED FROM VIDEOENCODERFACTORYNEW
+    std::vector<SdpVideoFormat> formats = { 
+      SdpVideoFormat(cricket::kH264CodecName, 
+      {
+        //copy-pasted from h264.cc
+        {cricket::kH264FmtpProfileLevelId, "42100b"},
+        {cricket::kH264FmtpLevelAsymmetryAllowed, "1"},
+        {cricket::kH264FmtpPacketizationMode, "0"}
+      }),
+      SdpVideoFormat(cricket::kH264CodecName, 
+      {
+        {cricket::kH264FmtpProfileLevelId, "42100b"},
+        {cricket::kH264FmtpLevelAsymmetryAllowed, "1"},
+        {cricket::kH264FmtpPacketizationMode, "1"}
+      }) 
+    };
+    return formats;
+  }
+
+  std::unique_ptr<VideoDecoder> WinUWPH264DecoderFactoryNew::CreateVideoDecoder(
+    const SdpVideoFormat& format) {
+    if (cricket::CodecNamesEq(format.name, cricket::kH264CodecName)) {
+      return std::make_unique<WinUWPH264DecoderImpl>();
+    }
+
+    RTC_LOG(LS_ERROR) << "Trying to create decoder of unsupported format "
+                    << format.name;
+    return nullptr;
+  }
+
 }  // namespace webrtc
 
