@@ -461,6 +461,7 @@ void WinUWPH264EncoderImpl::OnH264Encoded(ComPtr<IMFSample> sample) {
         encodedImage.capture_time_ms_ = frameAttributes.captureRenderTime;
         encodedImage._encodedWidth = frameAttributes.frameWidth;
         encodedImage._encodedHeight = frameAttributes.frameHeight;
+        encodedImage.xr_timestamp_ = frameAttributes.xr_timestamp_;
       }
       else {
         // No point in confusing the callback with a frame that doesn't
