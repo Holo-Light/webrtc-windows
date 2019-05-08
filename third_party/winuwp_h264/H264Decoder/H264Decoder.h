@@ -50,7 +50,7 @@ class WinUWPH264DecoderImpl : public H264Decoder {
   const char* ImplementationName() const override;
 
  private:
-  HRESULT FlushFrames(uint32_t timestamp, uint64_t ntp_time_ms);
+  HRESULT FlushFrames(const EncodedImage& input_image);
   HRESULT EnqueueFrame(const EncodedImage& input_image, bool missing_frames);
 
  private:

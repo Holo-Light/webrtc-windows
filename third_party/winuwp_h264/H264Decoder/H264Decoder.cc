@@ -219,8 +219,7 @@ HRESULT GetOutputStatus(ComPtr<IMFTransform> decoder, DWORD* output_status) {
  * Note: expected to return MF_E_TRANSFORM_NEED_MORE_INPUT and
  *       MF_E_TRANSFORM_STREAM_CHANGE which must be handled by caller.
  */
-HRESULT WinUWPH264DecoderImpl::FlushFrames(uint32_t rtp_timestamp,
-                                           uint64_t ntp_time_ms) {
+HRESULT WinUWPH264DecoderImpl::FlushFrames(const EncodedImage& input_image) {
   HRESULT hr;
   DWORD output_status;
 
@@ -352,10 +351,12 @@ HRESULT WinUWPH264DecoderImpl::FlushFrames(uint32_t rtp_timestamp,
     // and use it in place of rtp_timestamp, since MF may interpolate it.
     // Instead, we ignore the MFT sample time out, using rtp from in frame that
     // triggered this decoded frame.
-    VideoFrame decoded_frame(buffer, rtp_timestamp, 0, kVideoRotation_0);
+    VideoFrame decoded_frame(buffer, input_image.Timestamp(), 0, kVideoRotation_0);
+
+    decoded_frame.set_xr_timestamp(input_image.xr_timestamp_);
 
     // Use ntp time from the earliest frame
-    decoded_frame.set_ntp_time_ms(ntp_time_ms);
+    decoded_frame.set_ntp_time_ms(input_image.ntp_time_ms_);
 
     // Emit image to downstream
     if (decode_complete_callback_ != nullptr) {
@@ -510,7 +511,7 @@ int WinUWPH264DecoderImpl::Decode(const EncodedImage& input_image,
     return WEBRTC_VIDEO_CODEC_ERROR;
 
   // Flush any decoded samples resulting from new frame, invoking callback
-  hr = FlushFrames(input_image.Timestamp(), input_image.ntp_time_ms_);
+  hr = FlushFrames(input_image/*.Timestamp(), input_image.ntp_time_ms_*/);
 
   if (hr == MF_E_TRANSFORM_STREAM_CHANGE) {
     // Output media type is no longer suitable. Reconfigure and retry.
@@ -527,7 +528,7 @@ int WinUWPH264DecoderImpl::Decode(const EncodedImage& input_image,
     width_.reset();
     height_.reset();
 
-    hr = FlushFrames(input_image.Timestamp(), input_image.ntp_time_ms_);
+    hr = FlushFrames(input_image/*.Timestamp(), input_image.ntp_time_ms_*/);
   }
 
   if (SUCCEEDED(hr) || hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
