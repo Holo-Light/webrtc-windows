@@ -283,6 +283,7 @@ ComPtr<IMFSample> WinUWPH264EncoderImpl::FromVideoFrame(const VideoFrame& frame)
       frameAttributes.captureRenderTime = frame.render_time_ms();
       frameAttributes.frameWidth = frame.width();
       frameAttributes.frameHeight = frame.height();
+      frameAttributes.xr_timestamp_ = frame.xr_timestamp();
       _sampleAttributeQueue.push(timestampHns, frameAttributes);
     }
 
