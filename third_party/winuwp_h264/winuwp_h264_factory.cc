@@ -46,20 +46,20 @@ namespace webrtc {
   }
 
 
-  webrtc::VideoDecoder* WinUWPH264DecoderFactory::CreateVideoDecoder(
-    webrtc::VideoCodecType type) {
-    if (type == kVideoCodecH264) {
-      return new WinUWPH264DecoderImpl();
-    } else {
-      return nullptr;
-    }
-  }
+  // webrtc::VideoDecoder* WinUWPH264DecoderFactory::CreateVideoDecoder(
+  //   webrtc::VideoCodecType type) {
+  //   if (type == kVideoCodecH264) {
+  //     return new WinUWPH264DecoderImpl(d3d_device_.Get());
+  //   } else {
+  //     return nullptr;
+  //   }
+  // }
 
-  void WinUWPH264DecoderFactory::DestroyVideoDecoder(
-    webrtc::VideoDecoder* decoder) {
-    decoder->Release();
-    delete decoder;
-  }
+  // void WinUWPH264DecoderFactory::DestroyVideoDecoder(
+  //   webrtc::VideoDecoder* decoder) {
+  //   decoder->Release();
+  //   delete decoder;
+  // }
 
   std::vector<SdpVideoFormat> WinUWPH264EncoderFactoryNew::GetSupportedFormats()
     const {
@@ -126,7 +126,7 @@ namespace webrtc {
   std::unique_ptr<VideoDecoder> WinUWPH264DecoderFactoryNew::CreateVideoDecoder(
     const SdpVideoFormat& format) {
     if (cricket::CodecNamesEq(format.name, cricket::kH264CodecName)) {
-      return std::make_unique<WinUWPH264DecoderImpl>();
+      return std::make_unique<WinUWPH264DecoderImpl>(d3d_device_.Get());
     }
 
     RTC_LOG(LS_ERROR) << "Trying to create decoder of unsupported format "
