@@ -57,8 +57,9 @@ class WinUWPH264DecoderImpl : public H264Decoder {
  private:
   Microsoft::WRL::ComPtr<ID3D11Device> d3d_device_;
   Microsoft::WRL::ComPtr<IMFDXGIDeviceManager> dxgi_device_manager_;
-  Microsoft::WRL::ComPtr<ID3D11Texture2D> decoder_texture_array_;
+  // Microsoft::WRL::ComPtr<ID3D11Texture2D> decoder_texture_array_;
   UINT device_manager_reset_token_ = 0;
+  uint32_t d3d_aware_ = 0;
 
   Microsoft::WRL::ComPtr<IMFTransform> decoder_;
   I420BufferPool buffer_pool_;
@@ -66,7 +67,6 @@ class WinUWPH264DecoderImpl : public H264Decoder {
   bool inited_ = false;
   bool require_keyframe_ = true;
   uint32_t first_frame_rtp_ = 0;
-  uint32_t d3d_aware_ = 0;
   absl::optional<uint32_t> width_;
   absl::optional<uint32_t> height_;
   rtc::CriticalSection crit_;

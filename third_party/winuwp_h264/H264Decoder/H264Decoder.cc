@@ -167,15 +167,6 @@ int WinUWPH264DecoderImpl::InitDecode(const VideoCodec* codec_settings,
     return WEBRTC_VIDEO_CODEC_ERROR;
   }
 
-  ComPtr<IUnknown> spUnk;
-  dxgi_device_manager_.As(&spUnk);
-  hr = decoder_->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER,
-                                reinterpret_cast<ULONG_PTR>(spUnk.Get()));
-
-  if (FAILED(hr)) {
-    RTC_LOG_GLE_EX(LS_ERROR, hr) << "Failed to set DXGI manager on MFT";
-  }
-
   // Try set decoder attributes
   ComPtr<IMFAttributes> decoder_attrs;
   ON_SUCCEEDED(decoder_->GetAttributes(decoder_attrs.GetAddressOf()));
@@ -191,6 +182,18 @@ int WinUWPH264DecoderImpl::InitDecode(const VideoCodec* codec_settings,
     hr = decoder_attrs->GetUINT32(MF_SA_D3D11_AWARE, &d3d_aware_);
     if (SUCCEEDED(hr) && d3d_aware_ != 0) {
       RTC_LOG(LS_INFO) << "H264 MFT is D3D11 aware. Yeah, baby!";
+    }
+    // d3d_aware_ = 0;
+
+    if (d3d_aware_) {
+      ComPtr<IUnknown> spUnk;
+      dxgi_device_manager_.As(&spUnk);
+      hr = decoder_->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER,
+                                    reinterpret_cast<ULONG_PTR>(spUnk.Get()));
+
+      if (FAILED(hr)) {
+        RTC_LOG_GLE_EX(LS_ERROR, hr) << "Failed to set DXGI manager on MFT";
+      }
     }
 
     ON_SUCCEEDED(
@@ -239,6 +242,10 @@ int WinUWPH264DecoderImpl::InitDecode(const VideoCodec* codec_settings,
     RTC_LOG(LS_INFO) << "MFT can provide samples";
   }
 
+  if (stream_info.dwFlags && MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) {
+    RTC_LOG(LS_INFO) << "MFT provides samples";
+  }
+
   if (FAILED(hr) || !suitable_type_found) {
     RTC_LOG(LS_ERROR) << "Init failure: failed to find a valid output media "
                          "type for decoding.";
@@ -273,6 +280,8 @@ HRESULT GetOutputStatus(ComPtr<IMFTransform> decoder, DWORD* output_status) {
   HRESULT hr = decoder->GetOutputStatus(output_status);
 
   // Don't MFT trust output status for now.
+  // more info:
+  // https://social.msdn.microsoft.com/Forums/windowsdesktop/en-US/25326ce9-d53d-4f29-ab90-2ee5bb62fb49/imftransform-never-has-enough-input-data-to-process-a-frame?forum=mediafoundationdevelopment
   *output_status = MFT_OUTPUT_STATUS_SAMPLE_READY;
   return hr;
 }
@@ -285,147 +294,113 @@ HRESULT WinUWPH264DecoderImpl::FlushFrames(const EncodedImage& input_image) {
   HRESULT hr;
   DWORD output_status;
 
-  while (SUCCEEDED(hr = GetOutputStatus(decoder_, &output_status)) &&
-         output_status == MFT_OUTPUT_STATUS_SAMPLE_READY) {
-    // Get needed size of our output buffer
-    MFT_OUTPUT_STREAM_INFO strm_info;
-    ON_SUCCEEDED(decoder_->GetOutputStreamInfo(0, &strm_info));
-    if (FAILED(hr)) {
-      RTC_LOG(LS_ERROR) << "Decode failure: failed to get output stream info.";
-      return hr;
-    }
+  // while (SUCCEEDED(hr = GetOutputStatus(decoder_, &output_status)) &&
+  //        output_status == MFT_OUTPUT_STATUS_SAMPLE_READY) {
+  //   // Get needed size of our output buffer
+  //   MFT_OUTPUT_STREAM_INFO strm_info;
+  //   ON_SUCCEEDED(decoder_->GetOutputStreamInfo(0, &strm_info));
+  //   if (FAILED(hr)) {
+  //     RTC_LOG(LS_ERROR) << "Decode failure: failed to get output stream
+  //     info."; return hr;
+  //   }
 
-    // Create output sample
-    ComPtr<IMFMediaBuffer> out_buffer;
-    ON_SUCCEEDED(MFCreateMemoryBuffer(strm_info.cbSize, &out_buffer));
-    if (FAILED(hr)) {
-      RTC_LOG(LS_ERROR)
-          << "Decode failure: output image memory buffer creation failed.";
-      return hr;
-    }
+  if (d3d_aware_) {
+    while (SUCCEEDED(hr = GetOutputStatus(decoder_, &output_status)) &&
+           output_status == MFT_OUTPUT_STATUS_SAMPLE_READY) {
+      MFT_OUTPUT_DATA_BUFFER output_buffer = {};
+      DWORD status = 0;
+      hr = decoder_->ProcessOutput(0, 1, &output_buffer, &status);
 
-    ComPtr<IMFSample> out_sample;
-    ON_SUCCEEDED(MFCreateSample(&out_sample));
-    if (FAILED(hr)) {
-      RTC_LOG(LS_ERROR) << "Decode failure: output in_sample creation failed.";
-      return hr;
-    }
-
-    // Create output buffer description
-    MFT_OUTPUT_DATA_BUFFER output_data_buffer;
-    output_data_buffer.dwStatus = 0;
-    output_data_buffer.dwStreamID = 0;
-    output_data_buffer.pEvents = nullptr;
-    output_data_buffer.pSample = out_sample.Get();  // let the MFT allocate samples
-
-    // Invoke the Media Foundation decoder
-    // Note: we don't use ON_SUCCEEDED here since ProcessOutput returns
-    //       MF_E_TRANSFORM_NEED_MORE_INPUT often (too many log messages).
-    DWORD status;
-    hr = decoder_->ProcessOutput(0, 1, &output_data_buffer, &status);
-
-    if (FAILED(hr))
-      return hr; /* can return MF_E_TRANSFORM_NEED_MORE_INPUT or
-                    MF_E_TRANSFORM_STREAM_CHANGE (entirely acceptable) */
-
-    // update width and height
-    uint32_t width, height;
-    if (width_.has_value() && height_.has_value()) {
-      width = width_.value();
-      height = height_.value();
-    } else {
-      // Query the size from MF output media type
-      ComPtr<IMFMediaType> output_type;
-      ON_SUCCEEDED(
-          decoder_->GetOutputCurrentType(0, output_type.GetAddressOf()));
-
-      ON_SUCCEEDED(MFGetAttributeSize(output_type.Get(), MF_MT_FRAME_SIZE,
-                                      &width, &height));
       if (FAILED(hr)) {
-        RTC_LOG(LS_ERROR) << "Decode failure: could not read image dimensions "
-                             "from Media Foundation, so the video frame buffer "
-                             "size can not be determined.";
+        RTC_LOG_GLE_EX(LS_ERROR, hr) << "ProcessOutput failed";
         return hr;
       }
 
-      // Update members to avoid querying unnecessarily
-      width_.emplace(width);
-      height_.emplace(height);
+      // don't do shit, just process output so that the queue doesn't fill up
     }
+  } else {
+    while (SUCCEEDED(hr = GetOutputStatus(decoder_, &output_status)) &&
+           output_status == MFT_OUTPUT_STATUS_SAMPLE_READY) {
+      // Get needed size of our output buffer
+      MFT_OUTPUT_STREAM_INFO strm_info;
+      ON_SUCCEEDED(decoder_->GetOutputStreamInfo(0, &strm_info));
+      if (FAILED(hr)) {
+        RTC_LOG(LS_ERROR)
+            << "Decode failure: failed to get output stream info.";
+        return hr;
+      }
+      // Create output sample
+      ComPtr<IMFMediaBuffer> out_buffer;
+      ON_SUCCEEDED(MFCreateMemoryBuffer(strm_info.cbSize, &out_buffer));
+      if (FAILED(hr)) {
+        RTC_LOG(LS_ERROR)
+            << "Decode failure: output image memory buffer creation failed.";
+        return hr;
+      }
 
-    ON_SUCCEEDED(out_sample->AddBuffer(out_buffer.Get()));
-    if (FAILED(hr)) {
-      RTC_LOG(LS_ERROR)
-          << "Decode failure: failed to add buffer to output in_sample.";
-      return hr;
-    }
+      ComPtr<IMFSample> out_sample;
+      ON_SUCCEEDED(MFCreateSample(&out_sample));
+      if (FAILED(hr)) {
+        RTC_LOG(LS_ERROR)
+            << "Decode failure: output in_sample creation failed.";
+        return hr;
+      }
 
-    // out_sample = output_data_buffer.pSample;
-    hr = out_sample->GetBufferByIndex(0, out_buffer.GetAddressOf());
-    if (FAILED(hr)) {
-      RTC_LOG(LS_ERROR) << "Couldn't get buffer from MFT sample";
-    }
+      ON_SUCCEEDED(out_sample->AddBuffer(out_buffer.Get()));
+      if (FAILED(hr)) {
+        RTC_LOG(LS_ERROR)
+            << "Decode failure: failed to add buffer to output in_sample.";
+        return hr;
+      }
 
-    // ComPtr<IMFDXGIBuffer> spDxgiBuffer;
-    // hr = out_buffer.As(&spDxgiBuffer);
-    // if (SUCCEEDED(hr)) {
-    //   // do something with texture, preferably passing it on to someone else
-    //   ComPtr<ID3D11Texture2D> decoded_texture;
-    //   hr = spDxgiBuffer->GetResource(
-    //       IID_ID3D11Texture2D,
-    //       reinterpret_cast<LPVOID*>(decoded_texture.GetAddressOf()));
+      // Create output buffer description
+      MFT_OUTPUT_DATA_BUFFER output_data_buffer;
+      output_data_buffer.dwStatus = 0;
+      output_data_buffer.dwStreamID = 0;
+      output_data_buffer.pEvents = nullptr;
+      output_data_buffer.pSample = out_sample.Get();
 
-    //   if (FAILED(hr)) {
-    //     RTC_LOG_GLE_EX(LS_ERROR, hr)
-    //         << "Failed to get resource from DXGI buffer";
-    //     // TODO: return some error here
-    //   }
+      // Invoke the Media Foundation decoder
+      // Note: we don't use ON_SUCCEEDED here since ProcessOutput returns
+      //       MF_E_TRANSFORM_NEED_MORE_INPUT often (too many log messages).
+      DWORD status;
+      hr = decoder_->ProcessOutput(0, 1, &output_data_buffer, &status);
 
-    //   D3D11_TEXTURE2D_DESC desc = {};
-    //   decoded_texture->GetDesc(&desc);
+      if (FAILED(hr))
+        return hr; /* can return MF_E_TRANSFORM_NEED_MORE_INPUT or
+                      MF_E_TRANSFORM_STREAM_CHANGE (entirely acceptable) */
 
-    //   UINT subresource_index = 0;
-    //   hr = spDxgiBuffer->GetSubresourceIndex(&subresource_index);
-    //   if (FAILED(hr)) {
-    //     RTC_LOG_GLE_EX(LS_ERROR, hr) << "Failed to get subresource index";
-    //   }
-
-    //   // TODO: we'll likely need to pass subresource_index into here if the
-    //   MFT
-    //   // allocates stuff in texture arrays (which would make sense)
-    //   rtc::scoped_refptr<hololight::D3D11VideoFrameBuffer> buffer =
-    //       hololight::D3D11VideoFrameBuffer::Create(
-    //           nullptr, nullptr, decoded_texture.Get(), width, height);
-
-    //   // LONGLONG sample_time; /* unused */
-    //   // ON_SUCCEEDED(spOutSample->GetSampleTime(&sample_time));
-
-    //   // TODO: Ideally, we should convert sample_time (above) back to 90khz +
-    //   // base and use it in place of rtp_timestamp, since MF may interpolate
-    //   it.
-    //   // Instead, we ignore the MFT sample time out, using rtp from in frame
-    //   // that triggered this decoded frame.
-    //   VideoFrame decoded_frame(buffer, input_image.Timestamp(), 0,
-    //                            kVideoRotation_0);
-
-    //   decoded_frame.set_xr_timestamp(input_image.xr_timestamp_);
-
-    //   // Use ntp time from the earliest frame
-    //   decoded_frame.set_ntp_time_ms(input_image.ntp_time_ms_);
-
-    //   // Emit image to downstream
-    //   if (decode_complete_callback_ != nullptr) {
-    //     decode_complete_callback_->Decoded(decoded_frame, absl::nullopt,
-    //                                        absl::nullopt);
-    //   }
-    /*} else*/ {
-      // do stuff that was done previously
       // Copy raw output sample data to video frame buffer.
       ComPtr<IMFMediaBuffer> src_buffer;
       ON_SUCCEEDED(out_sample->ConvertToContiguousBuffer(&src_buffer));
       if (FAILED(hr)) {
         RTC_LOG(LS_ERROR) << "Decode failure: failed to get contiguous buffer.";
         return hr;
+      }
+
+      uint32_t width, height;
+      if (width_.has_value() && height_.has_value()) {
+        width = width_.value();
+        height = height_.value();
+      } else {
+        // Query the size from MF output media type
+        ComPtr<IMFMediaType> output_type;
+        ON_SUCCEEDED(
+            decoder_->GetOutputCurrentType(0, output_type.GetAddressOf()));
+
+        ON_SUCCEEDED(MFGetAttributeSize(output_type.Get(), MF_MT_FRAME_SIZE,
+                                        &width, &height));
+        if (FAILED(hr)) {
+          RTC_LOG(LS_ERROR)
+              << "Decode failure: could not read image dimensions "
+                 "from Media Foundation, so the video frame buffer "
+                 "size can not be determined.";
+          return hr;
+        }
+
+        // Update members to avoid querying unnecessarily
+        width_.emplace(width);
+        height_.emplace(height);
       }
 
       rtc::scoped_refptr<I420Buffer> buffer =
@@ -455,8 +430,8 @@ HRESULT WinUWPH264DecoderImpl::FlushFrames(const EncodedImage& input_image) {
         }
 
         // Convert NV12 to I420. Y and UV sections have same stride in NV12
-        // (width). The size of the Y section is the size of the frame, since Y
-        // luminance values are 8-bits each.
+        // (width). The size of the Y section is the size of the frame, since
+        // Y luminance values are 8-bits each.
         libyuv::NV12ToI420(src_data, width, src_data + (width * height), width,
                            buffer->MutableDataY(), buffer->StrideY(),
                            buffer->MutableDataU(), buffer->StrideU(),
@@ -472,9 +447,9 @@ HRESULT WinUWPH264DecoderImpl::FlushFrames(const EncodedImage& input_image) {
       // ON_SUCCEEDED(spOutSample->GetSampleTime(&sample_time));
 
       // TODO: Ideally, we should convert sample_time (above) back to 90khz +
-      // base and use it in place of rtp_timestamp, since MF may interpolate it.
-      // Instead, we ignore the MFT sample time out, using rtp from in frame
-      // that triggered this decoded frame.
+      // base and use it in place of rtp_timestamp, since MF may interpolate
+      // it. Instead, we ignore the MFT sample time out, using rtp from in
+      // frame that triggered this decoded frame.
       VideoFrame decoded_frame(buffer, input_image.Timestamp(), 0,
                                kVideoRotation_0);
 
@@ -490,6 +465,7 @@ HRESULT WinUWPH264DecoderImpl::FlushFrames(const EncodedImage& input_image) {
       }
     }
   }
+  // }
 
   return hr;
 }
@@ -586,7 +562,9 @@ HRESULT WinUWPH264DecoderImpl::EnqueueFrame(const EncodedImage& input_image,
   }
 
   // Enqueue sample with Media Foundation
-  ON_SUCCEEDED(decoder_->ProcessInput(0, in_sample.Get(), 0));
+  hr = decoder_->ProcessInput(0, in_sample.Get(), 0);
+  if (FAILED(hr))
+    RTC_LOG_GLE_EX(LS_ERROR, hr) << "ProcessInput failed";
   return hr;
 }
 
