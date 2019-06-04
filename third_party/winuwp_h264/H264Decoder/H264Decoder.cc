@@ -369,29 +369,26 @@ HRESULT WinUWPH264DecoderImpl::FlushFrames(const EncodedImage& input_image) {
       }
 
       ComPtr<ID3D11Texture2D> out_texture;
-      hr = dxgi_buffer->GetResource(IID_ID3D11Texture2D, reinterpret_cast<LPVOID*>(out_texture.GetAddressOf()));
+      hr = dxgi_buffer->GetResource(
+          IID_ID3D11Texture2D,
+          reinterpret_cast<LPVOID*>(out_texture.GetAddressOf()));
       if (FAILED(hr)) {
-        RTC_LOG_GLE_EX(LS_ERROR, hr) << "Failed to get texture from dxgi buffer";
+        RTC_LOG_GLE_EX(LS_ERROR, hr)
+            << "Failed to get texture from dxgi buffer";
         return hr;
       }
 
       UINT subresource_index = 0;
       hr = dxgi_buffer->GetSubresourceIndex(&subresource_index);
       if (FAILED(hr)) {
-        RTC_LOG_GLE_EX(LS_ERROR, hr) << "Failed to get subresource index from dxgi buffer";
+        RTC_LOG_GLE_EX(LS_ERROR, hr)
+            << "Failed to get subresource index from dxgi buffer";
         return hr;
       }
 
-      auto buffer = hololight::D3D11VideoFrameBuffer::Create(nullptr, nullptr, out_texture.Get(), width_.value(), height_.value());
-
-      // auto buffer = buffer_pool_.CreateBuffer(width, height);
-
-      // if (!buffer.get()) {
-      //   // Pool has too many pending frames.
-      //   RTC_LOG(LS_WARNING)
-      //       << "Decode warning: too many frames. Dropping frame.";
-      //   return WEBRTC_VIDEO_CODEC_NO_OUTPUT;
-      // }
+      auto buffer = hololight::D3D11VideoFrameBuffer::Create(
+          nullptr, nullptr, out_texture.Get(), width_.value(), height_.value());
+      buffer->set_subresource_index(subresource_index);
 
       // LONGLONG sample_time; /* unused */
       // ON_SUCCEEDED(spOutSample->GetSampleTime(&sample_time));
