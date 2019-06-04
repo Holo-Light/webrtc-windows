@@ -58,28 +58,6 @@ WinUWPH264DecoderImpl::WinUWPH264DecoderImpl(ID3D11Device* device)
     device_manager_reset_token_ = 0;
     return;
   }
-
-  ComPtr<IUnknown> spUnk;
-  d3d_device_.As(&spUnk);
-  hr = dxgi_device_manager_->ResetDevice(spUnk.Get(),
-                                         device_manager_reset_token_);
-
-  if (FAILED(hr)) {
-    RTC_LOG_GLE_EX(LS_ERROR, hr) << "DXGI manager ResetDevice failed";
-  }
-
-  // QI for ID3D10Multithread
-  ComPtr<ID3D10Multithread> spMultithread;
-  hr = d3d_device_.As(&spMultithread);
-
-  if (FAILED(hr)) {
-    RTC_LOG_GLE_EX(LS_WARNING, hr) << "ID3D1xMultithread not supported. "
-                                      "Multithread protection will not be used";
-  }
-
-  if (spMultithread.Get() != nullptr) {
-    spMultithread->SetMultithreadProtected(TRUE);
-  }
 }
 
 WinUWPH264DecoderImpl::~WinUWPH264DecoderImpl() {
@@ -146,6 +124,9 @@ int WinUWPH264DecoderImpl::InitDecode(const VideoCodec* codec_settings,
                                       int number_of_cores) {
   RTC_LOG(LS_INFO) << "WinUWPH264DecoderImpl::InitDecode()\n";
 
+  RTC_LOG(LS_INFO) << "Initializing decoder with profile "
+                   << codec_settings->H264().profile;
+
   width_ = codec_settings->width > 0
                ? absl::optional<UINT32>(codec_settings->width)
                : absl::nullopt;
@@ -187,12 +168,36 @@ int WinUWPH264DecoderImpl::InitDecode(const VideoCodec* codec_settings,
 
     if (d3d_aware_) {
       ComPtr<IUnknown> spUnk;
+      d3d_device_.As(&spUnk);
+      hr = dxgi_device_manager_->ResetDevice(spUnk.Get(),
+                                             device_manager_reset_token_);
+
+      if (FAILED(hr)) {
+        RTC_LOG_GLE_EX(LS_ERROR, hr) << "DXGI manager ResetDevice failed";
+        // TODO: fall back to sw decoding
+      }
+
+      spUnk = nullptr;
       dxgi_device_manager_.As(&spUnk);
       hr = decoder_->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER,
                                     reinterpret_cast<ULONG_PTR>(spUnk.Get()));
 
       if (FAILED(hr)) {
         RTC_LOG_GLE_EX(LS_ERROR, hr) << "Failed to set DXGI manager on MFT";
+      }
+
+      // QI for ID3D10Multithread
+      ComPtr<ID3D10Multithread> spMultithread;
+      hr = d3d_device_.As(&spMultithread);
+
+      if (FAILED(hr)) {
+        RTC_LOG_GLE_EX(LS_WARNING, hr)
+            << "ID3D1xMultithread not supported. "
+               "Multithread protection will not be used";
+      }
+
+      if (spMultithread.Get() != nullptr) {
+        spMultithread->SetMultithreadProtected(TRUE);
       }
     }
 
@@ -238,11 +243,11 @@ int WinUWPH264DecoderImpl::InitDecode(const VideoCodec* codec_settings,
   MFT_OUTPUT_STREAM_INFO stream_info = {};
   hr = decoder_->GetOutputStreamInfo(0, &stream_info);
 
-  if (stream_info.dwFlags && MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES) {
+  if (stream_info.dwFlags & MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES) {
     RTC_LOG(LS_INFO) << "MFT can provide samples";
   }
 
-  if (stream_info.dwFlags && MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) {
+  if (stream_info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) {
     RTC_LOG(LS_INFO) << "MFT provides samples";
   }
 
@@ -294,17 +299,9 @@ HRESULT WinUWPH264DecoderImpl::FlushFrames(const EncodedImage& input_image) {
   HRESULT hr;
   DWORD output_status;
 
-  // while (SUCCEEDED(hr = GetOutputStatus(decoder_, &output_status)) &&
-  //        output_status == MFT_OUTPUT_STATUS_SAMPLE_READY) {
-  //   // Get needed size of our output buffer
-  //   MFT_OUTPUT_STREAM_INFO strm_info;
-  //   ON_SUCCEEDED(decoder_->GetOutputStreamInfo(0, &strm_info));
-  //   if (FAILED(hr)) {
-  //     RTC_LOG(LS_ERROR) << "Decode failure: failed to get output stream
-  //     info."; return hr;
-  //   }
-
   if (d3d_aware_) {
+    ComPtr<IMFSample> out_sample;
+
     while (SUCCEEDED(hr = GetOutputStatus(decoder_, &output_status)) &&
            output_status == MFT_OUTPUT_STATUS_SAMPLE_READY) {
       MFT_OUTPUT_DATA_BUFFER output_buffer = {};
@@ -312,11 +309,110 @@ HRESULT WinUWPH264DecoderImpl::FlushFrames(const EncodedImage& input_image) {
       hr = decoder_->ProcessOutput(0, 1, &output_buffer, &status);
 
       if (FAILED(hr)) {
-        RTC_LOG_GLE_EX(LS_ERROR, hr) << "ProcessOutput failed";
+        // only print when we don't need more input, since that's an expected
+        // result
+        if (hr != MF_E_TRANSFORM_NEED_MORE_INPUT) {
+          RTC_LOG_GLE_EX(LS_ERROR, hr) << "ProcessOutput failed";
+        }
+
         return hr;
       }
 
-      // don't do shit, just process output so that the queue doesn't fill up
+      if (output_buffer.dwStatus & MFT_OUTPUT_DATA_BUFFER_NO_SAMPLE) {
+        // I'm not quite sure this gets propagated upwards since it's never
+        // checked, but this should probably be fixed so webrtc gets the right
+        // feedback from the decoder.
+        return WEBRTC_VIDEO_CODEC_NO_OUTPUT;
+      }
+
+      uint32_t width, height;
+      if (width_.has_value() && height_.has_value()) {
+        width = width_.value();
+        height = height_.value();
+      } else {
+        // Query the size from MF output media type
+        ComPtr<IMFMediaType> output_type;
+        ON_SUCCEEDED(
+            decoder_->GetOutputCurrentType(0, output_type.GetAddressOf()));
+
+        ON_SUCCEEDED(MFGetAttributeSize(output_type.Get(), MF_MT_FRAME_SIZE,
+                                        &width, &height));
+        if (FAILED(hr)) {
+          RTC_LOG(LS_ERROR)
+              << "Decode failure: could not read image dimensions "
+                 "from Media Foundation, so the video frame buffer "
+                 "size can not be determined.";
+          return hr;
+        }
+
+        // Update members to avoid querying unnecessarily
+        width_.emplace(width);
+        height_.emplace(height);
+      }
+
+      // If this goes out of scope it should free the sample, which is not
+      // documented but required anyway otherwise the decoder locks up.
+      out_sample.Attach(output_buffer.pSample);
+      ComPtr<IMFDXGIBuffer> dxgi_buffer;
+      ComPtr<IMFMediaBuffer> mf_buffer;
+
+      hr = out_sample->GetBufferByIndex(0, mf_buffer.GetAddressOf());
+      if (FAILED(hr)) {
+        RTC_LOG_GLE_EX(LS_ERROR, hr) << "Failed to get buffer from sample";
+        return hr;
+      }
+
+      hr = mf_buffer.As(&dxgi_buffer);
+      if (FAILED(hr)) {
+        RTC_LOG_GLE_EX(LS_ERROR, hr) << "Failed to get dxgi buffer";
+        return hr;
+      }
+
+      ComPtr<ID3D11Texture2D> out_texture;
+      hr = dxgi_buffer->GetResource(IID_ID3D11Texture2D, reinterpret_cast<LPVOID*>(out_texture.GetAddressOf()));
+      if (FAILED(hr)) {
+        RTC_LOG_GLE_EX(LS_ERROR, hr) << "Failed to get texture from dxgi buffer";
+        return hr;
+      }
+
+      UINT subresource_index = 0;
+      hr = dxgi_buffer->GetSubresourceIndex(&subresource_index);
+      if (FAILED(hr)) {
+        RTC_LOG_GLE_EX(LS_ERROR, hr) << "Failed to get subresource index from dxgi buffer";
+        return hr;
+      }
+
+      auto buffer = hololight::D3D11VideoFrameBuffer::Create(nullptr, nullptr, out_texture.Get(), width_.value(), height_.value());
+
+      // auto buffer = buffer_pool_.CreateBuffer(width, height);
+
+      // if (!buffer.get()) {
+      //   // Pool has too many pending frames.
+      //   RTC_LOG(LS_WARNING)
+      //       << "Decode warning: too many frames. Dropping frame.";
+      //   return WEBRTC_VIDEO_CODEC_NO_OUTPUT;
+      // }
+
+      // LONGLONG sample_time; /* unused */
+      // ON_SUCCEEDED(spOutSample->GetSampleTime(&sample_time));
+
+      // TODO: Ideally, we should convert sample_time (above) back to 90khz +
+      // base and use it in place of rtp_timestamp, since MF may interpolate
+      // it. Instead, we ignore the MFT sample time out, using rtp from in
+      // frame that triggered this decoded frame.
+      VideoFrame decoded_frame(buffer, input_image.Timestamp(), 0,
+                               kVideoRotation_0);
+
+      decoded_frame.set_xr_timestamp(input_image.xr_timestamp_);
+
+      // Use ntp time from the earliest frame
+      decoded_frame.set_ntp_time_ms(input_image.ntp_time_ms_);
+
+      // Emit image to downstream
+      if (decode_complete_callback_ != nullptr) {
+        decode_complete_callback_->Decoded(decoded_frame, absl::nullopt,
+                                           absl::nullopt);
+      }
     }
   } else {
     while (SUCCEEDED(hr = GetOutputStatus(decoder_, &output_status)) &&
