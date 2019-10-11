@@ -42,10 +42,10 @@ namespace webrtc {
 //////////////////////////////////////////
 
 WinUWPH264DecoderImpl::WinUWPH264DecoderImpl(ID3D11Device* device)
-    : width_(absl::nullopt),
+    : buffer_pool_(false, 300), /* max_number_of_buffers*/ 
+      width_(absl::nullopt),
       height_(absl::nullopt),
       decode_complete_callback_(nullptr),
-      buffer_pool_(false, 300) /* max_number_of_buffers*/,
       d3d_device_(device) {
   RTC_CHECK(device != nullptr) << "D3D device ptr was null";
   // Create dxgi manager

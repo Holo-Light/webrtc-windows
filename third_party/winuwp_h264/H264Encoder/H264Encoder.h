@@ -75,17 +75,20 @@ class WinUWPH264EncoderImpl : public VideoEncoder, public IH264EncodingCallback 
   int framePendingCount_ {};
   DWORD frameCount_ {};
   bool lastFrameDropped_ {};
+  //These fields are never used
+  /*
   UINT32 currentWidth_ {};
   UINT32 currentHeight_ {};
   UINT32 currentBitrateBps_ {};
   UINT32 currentFps_ {};
+  */
   UINT32 max_bitrate_;
 
   UINT32 width_;
   UINT32 height_;
-  UINT32 max_frame_rate_;
+  UINT32 frame_rate_;
   UINT32 target_bps_;
-  VideoCodecMode mode_;  
+  VideoCodecMode mode_;
   // H.264 specifc parameters
   bool frame_dropping_on_;
   int key_frame_interval_;
