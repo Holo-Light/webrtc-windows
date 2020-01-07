@@ -325,27 +325,34 @@ HRESULT WinUWPH264DecoderImpl::FlushFrames(const EncodedImage& input_image) {
         return WEBRTC_VIDEO_CODEC_NO_OUTPUT;
       }
 
-      uint32_t width, height;
-      if (width_.has_value() && height_.has_value()) {
-        width = width_.value();
-        height = height_.value();
-      } else {
-        // Query the size from MF output media type
+      uint32_t width, height, buffer_width, buffer_height;
+      {
+        // Get the output media type
         ComPtr<IMFMediaType> output_type;
         ON_SUCCEEDED(
             decoder_->GetOutputCurrentType(0, output_type.GetAddressOf()));
 
+        // Query the actual buffer size to get the stride and vertical padding,
+        // so the UV plane can be accessed at the right offset.
         ON_SUCCEEDED(MFGetAttributeSize(output_type.Get(), MF_MT_FRAME_SIZE,
-                                        &width, &height));
-        if (FAILED(hr)) {
-          RTC_LOG(LS_ERROR)
-              << "Decode failure: could not read image dimensions "
-                 "from Media Foundation, so the video frame buffer "
-                 "size can not be determined.";
-          return hr;
+                                        &buffer_width, &buffer_height));
+
+        // Query the visible area of the frame, which is the data that must be
+        // returned to the caller. Sometimes this attribute is not present, and
+        // in general this means that the frame size is not padded.
+        MFVideoArea video_area;
+        if (SUCCEEDED(output_type->GetBlob(MF_MT_MINIMUM_DISPLAY_APERTURE,
+                                           (UINT8*)&video_area,
+                                           sizeof(video_area), nullptr))) {
+          width = video_area.Area.cx;
+          height = video_area.Area.cy;
+        } else {
+          // Fallback to buffer size
+          width = buffer_width;
+          height = buffer_height;
         }
 
-        // Update members to avoid querying unnecessarily
+        // Update cached values
         width_.emplace(width);
         height_.emplace(height);
       }
@@ -471,27 +478,34 @@ HRESULT WinUWPH264DecoderImpl::FlushFrames(const EncodedImage& input_image) {
         return hr;
       }
 
-      uint32_t width, height;
-      if (width_.has_value() && height_.has_value()) {
-        width = width_.value();
-        height = height_.value();
-      } else {
-        // Query the size from MF output media type
+      uint32_t width, height, buffer_width, buffer_height;
+      {
+        // Get the output media type
         ComPtr<IMFMediaType> output_type;
         ON_SUCCEEDED(
             decoder_->GetOutputCurrentType(0, output_type.GetAddressOf()));
 
+        // Query the actual buffer size to get the stride and vertical padding,
+        // so the UV plane can be accessed at the right offset.
         ON_SUCCEEDED(MFGetAttributeSize(output_type.Get(), MF_MT_FRAME_SIZE,
-                                        &width, &height));
-        if (FAILED(hr)) {
-          RTC_LOG(LS_ERROR)
-              << "Decode failure: could not read image dimensions "
-                 "from Media Foundation, so the video frame buffer "
-                 "size can not be determined.";
-          return hr;
+                                        &buffer_width, &buffer_height));
+
+        // Query the visible area of the frame, which is the data that must be
+        // returned to the caller. Sometimes this attribute is not present, and
+        // in general this means that the frame size is not padded.
+        MFVideoArea video_area;
+        if (SUCCEEDED(output_type->GetBlob(MF_MT_MINIMUM_DISPLAY_APERTURE,
+                                           (UINT8*)&video_area,
+                                           sizeof(video_area), nullptr))) {
+          width = video_area.Area.cx;
+          height = video_area.Area.cy;
+        } else {
+          // Fallback to buffer size
+          width = buffer_width;
+          height = buffer_height;
         }
 
-        // Update members to avoid querying unnecessarily
+        // Update cached values
         width_.emplace(width);
         height_.emplace(height);
       }
@@ -523,9 +537,12 @@ HRESULT WinUWPH264DecoderImpl::FlushFrames(const EncodedImage& input_image) {
         }
 
         // Convert NV12 to I420. Y and UV sections have same stride in NV12
-        // (width). The size of the Y section is the size of the frame, since
-        // Y luminance values are 8-bits each.
-        libyuv::NV12ToI420(src_data, width, src_data + (width * height), width,
+        // (width). The size of the Y section is the size of the frame, since Y
+        // luminance values are 8-bits each.
+        const int src_stride_y = buffer_width;
+        const int src_stride_uv = buffer_width;
+        const uint8_t* src_uv = src_data + (src_stride_y * buffer_height);
+        libyuv::NV12ToI420(src_data, src_stride_y, src_uv, src_stride_uv,
                            buffer->MutableDataY(), buffer->StrideY(),
                            buffer->MutableDataU(), buffer->StrideU(),
                            buffer->MutableDataV(), buffer->StrideV(), width,
@@ -558,7 +575,6 @@ HRESULT WinUWPH264DecoderImpl::FlushFrames(const EncodedImage& input_image) {
       }
     }
   }
-  // }
 
   return hr;
 }

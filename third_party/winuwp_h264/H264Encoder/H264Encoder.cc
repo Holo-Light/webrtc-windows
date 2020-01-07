@@ -38,11 +38,32 @@
 #pragma comment(lib, "mfplat")
 #pragma comment(lib, "mfuuid.lib")
 
+// Determines whether to pad or crop frames whose height is not multiple of 16.
+// User code should extern-declare and set this. There seems to be no easy way
+// to pass arbitrary parameters to the encoder so this is the best (easy)
+// option.
+static constexpr int kFrameHeightNoChange = 0;
+static constexpr int kFrameHeightCrop = 1;
+static constexpr int kFrameHeightPad = 2;
+int webrtc__WinUWPH264EncoderImpl__frame_height_round_mode = kFrameHeightNoChange;
+
 namespace webrtc {
 
 // QP scaling thresholds.
-static const int kLowH264QpThreshold = 24;
-static const int kHighH264QpThreshold = 37;
+static constexpr int kLowH264QpThreshold = 24;
+static constexpr int kHighH264QpThreshold = 37;
+
+static constexpr unsigned kMaxH264Qp = 51;
+
+// On some encoders (e.g. Hololens) changing rates is slow and will cause
+// visible stuttering, so we don't want to do it too often.
+// todo(fibann): we are ignoring small variations which means the rates might
+// end up being off the requested value by a small amount in the long term. We
+// should not ignore small variations but possibly use a longer min interval so
+// they are eventually applied.
+static constexpr int kMinIntervalBetweenRateChangesMs = 5000;
+static constexpr float kMinRateVariation = 0.1f;
+
 //////////////////////////////////////////
 // H264 WinUWP Encoder Implementation
 //////////////////////////////////////////
@@ -54,6 +75,21 @@ WinUWPH264EncoderImpl::WinUWPH264EncoderImpl()
 WinUWPH264EncoderImpl::~WinUWPH264EncoderImpl() {
   Release();
 }
+
+namespace {
+
+UINT32 HeightToEncode(UINT32 height) {
+  switch (webrtc__WinUWPH264EncoderImpl__frame_height_round_mode) {
+    default:
+	case kFrameHeightNoChange:
+      return height;
+    case kFrameHeightCrop:
+      return height & ~15;
+    case kFrameHeightPad:
+      return (height + 15) & ~15;
+  }
+}
+}  // namespace
 
 int WinUWPH264EncoderImpl::InitEncode(const VideoCodec* codec_settings,
   int /*number_of_cores*/,
@@ -79,6 +115,8 @@ int WinUWPH264EncoderImpl::InitEncode(const VideoCodec* codec_settings,
   // the desired frame rate too.
   frame_rate_ = codec_settings->maxFramerate;
 
+  max_qp_ = std::min(codec_settings->qpMax, kMaxH264Qp);
+
   mode_ = codec_settings->mode;
   frame_dropping_on_ = codec_settings->H264().frameDroppingOn;
   key_frame_interval_ = codec_settings->H264().keyFrameInterval;
@@ -95,15 +133,21 @@ int WinUWPH264EncoderImpl::InitEncode(const VideoCodec* codec_settings,
     target_bps_ = width_ * height_ * 2;
   }
 
-  return InitEncoderWithSettings(codec_settings);
+  // Configure the encoder.
+  HRESULT hr = S_OK;
+  ON_SUCCEEDED(MFStartup(MF_VERSION));
+
+  ON_SUCCEEDED(InitWriter());
+
+  return hr;
 }
 
-int WinUWPH264EncoderImpl::InitEncoderWithSettings(const VideoCodec* codec_settings) {
+int WinUWPH264EncoderImpl::InitWriter() {
   HRESULT hr = S_OK;
 
   rtc::CritScope lock(&crit_);
 
-  ON_SUCCEEDED(MFStartup(MF_VERSION));
+  UINT32 encoded_height = HeightToEncode(height_);
 
   // output media type (h264)
   ComPtr<IMFMediaType> mediaTypeOut;
@@ -118,10 +162,10 @@ int WinUWPH264EncoderImpl::InitEncoderWithSettings(const VideoCodec* codec_setti
     MF_MT_AVG_BITRATE, target_bps_));
   ON_SUCCEEDED(mediaTypeOut->SetUINT32(
     MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive));
-  ON_SUCCEEDED(MFSetAttributeSize(mediaTypeOut.Get(),
-    MF_MT_FRAME_SIZE, width_, height_));
-  ON_SUCCEEDED(MFSetAttributeRatio(mediaTypeOut.Get(),
-    MF_MT_FRAME_RATE, frame_rate_, 1));
+  ON_SUCCEEDED(MFSetAttributeSize(mediaTypeOut.Get(), MF_MT_FRAME_SIZE, width_,
+                                  encoded_height));
+  ON_SUCCEEDED(MFSetAttributeRatio(mediaTypeOut.Get(), MF_MT_FRAME_RATE,
+                                   frame_rate_, 1));
 
   // input media type (nv12)
   ComPtr<IMFMediaType> mediaTypeIn;
@@ -131,8 +175,9 @@ int WinUWPH264EncoderImpl::InitEncoderWithSettings(const VideoCodec* codec_setti
   ON_SUCCEEDED(mediaTypeIn->SetUINT32(
     MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive));
   ON_SUCCEEDED(mediaTypeIn->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE));
-  ON_SUCCEEDED(MFSetAttributeSize(mediaTypeIn.Get(),
-    MF_MT_FRAME_SIZE, width_, height_));
+  ON_SUCCEEDED(MFSetAttributeSize(mediaTypeIn.Get(), MF_MT_FRAME_SIZE, width_,
+                                  encoded_height));
+
   ON_SUCCEEDED(MFSetAttributeRatio(mediaTypeIn.Get(),
     MF_MT_FRAME_RATE, frame_rate_, 1));
 
@@ -140,35 +185,42 @@ int WinUWPH264EncoderImpl::InitEncoderWithSettings(const VideoCodec* codec_setti
   ON_SUCCEEDED(Microsoft::WRL::MakeAndInitialize<H264MediaSink>(&mediaSink_));
 
   // SinkWriter creation attributes
-  ON_SUCCEEDED(MFCreateAttributes(&sinkWriterCreationAttributes_, 1));
-  ON_SUCCEEDED(sinkWriterCreationAttributes_->SetUINT32(
+  ComPtr<IMFAttributes> sinkWriterCreationAttributes;
+  ON_SUCCEEDED(MFCreateAttributes(&sinkWriterCreationAttributes, 1));
+  ON_SUCCEEDED(sinkWriterCreationAttributes->SetUINT32(
     MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE));
-  ON_SUCCEEDED(sinkWriterCreationAttributes_->SetUINT32(
+  ON_SUCCEEDED(sinkWriterCreationAttributes->SetUINT32(
     MF_SINK_WRITER_DISABLE_THROTTLING, TRUE));
-  ON_SUCCEEDED(sinkWriterCreationAttributes_->SetUINT32(
+  ON_SUCCEEDED(sinkWriterCreationAttributes->SetUINT32(
     MF_LOW_LATENCY, TRUE));
 
   // Create the sink writer
   ON_SUCCEEDED(MFCreateSinkWriterFromMediaSink(mediaSink_.Get(),
-    sinkWriterCreationAttributes_.Get(), &sinkWriter_));
+    sinkWriterCreationAttributes.Get(), &sinkWriter_));
 
   // Add the h264 output stream to the writer
   ON_SUCCEEDED(sinkWriter_->AddStream(mediaTypeOut.Get(), &streamIndex_));
 
   // SinkWriter encoder properties
-  ON_SUCCEEDED(MFCreateAttributes(&sinkWriterEncoderAttributes_, 1));
-  ON_SUCCEEDED(sinkWriter_->SetInputMediaType(streamIndex_, mediaTypeIn.Get(), nullptr));
+  ComPtr<IMFAttributes> encodingAttributes;
+  ON_SUCCEEDED(MFCreateAttributes(&encodingAttributes, 1));
+
+  // kMaxH264Qp is the default.
+  if (max_qp_ < kMaxH264Qp) {
+    ON_SUCCEEDED(
+        encodingAttributes->SetUINT32(CODECAPI_AVEncVideoMaxQP, max_qp_));
+  }
+  ON_SUCCEEDED(sinkWriter_->SetInputMediaType(streamIndex_, mediaTypeIn.Get(),
+                                              encodingAttributes.Get()));
 
   // Register this as the callback for encoded samples.
   ON_SUCCEEDED(mediaSink_->RegisterEncodingCallback(this));
 
   ON_SUCCEEDED(sinkWriter_->BeginWriting());
 
-  codec_ = *codec_settings;
-
   if (SUCCEEDED(hr)) {
     inited_ = true;
-    lastTimeSettingsChanged_ = rtc::TimeMillis();
+    last_rate_change_time_rtc_ms = rtc::TimeMillis();
     return WEBRTC_VIDEO_CODEC_OK;
   } else {
     return hr;
@@ -182,7 +234,7 @@ int WinUWPH264EncoderImpl::RegisterEncodeCompleteCallback(
   return WEBRTC_VIDEO_CODEC_OK;
 }
 
-int WinUWPH264EncoderImpl::Release() {
+int WinUWPH264EncoderImpl::ReleaseWriter() {
   // Use a temporary sink variable to prevent lock inversion
   // between the shutdown call and OnH264Encoded() callback.
   ComPtr<H264MediaSink> tmpMediaSink;
@@ -193,8 +245,6 @@ int WinUWPH264EncoderImpl::Release() {
     if (mediaSink_ != nullptr) {
       tmpMediaSink = mediaSink_;
     }
-    sinkWriterCreationAttributes_.Reset();
-    sinkWriterEncoderAttributes_.Reset();
     mediaSink_.Reset();
     startTime_ = 0;
     lastTimestampHns_ = 0;
@@ -212,6 +262,13 @@ int WinUWPH264EncoderImpl::Release() {
   return WEBRTC_VIDEO_CODEC_OK;
 }
 
+int WinUWPH264EncoderImpl::Release() {
+  ReleaseWriter();
+  HRESULT hr = S_OK;
+  ON_SUCCEEDED(MFShutdown());
+  return WEBRTC_VIDEO_CODEC_OK;
+}
+
 ComPtr<IMFSample> WinUWPH264EncoderImpl::FromVideoFrame(const VideoFrame& frame) {
   HRESULT hr = S_OK;
   ComPtr<IMFSample> sample;
@@ -223,11 +280,24 @@ ComPtr<IMFSample> WinUWPH264EncoderImpl::FromVideoFrame(const VideoFrame& frame)
   rtc::scoped_refptr<I420BufferInterface> frameBuffer =
       static_cast<I420BufferInterface*>(frame.video_frame_buffer().get());
 
-  if (SUCCEEDED(hr)) {
-    auto totalSize = frameBuffer->StrideY() * frameBuffer->height() +
-      frameBuffer->StrideU() * (frameBuffer->height() + 1) / 2 +
-      frameBuffer->StrideV() * (frameBuffer->height() + 1) / 2;
+  assert(frameBuffer->width() == width_);
+  assert(frameBuffer->height() == height_);
+  int encoded_height = HeightToEncode(height_);
 
+  int dst_height_uv = (height_ + 1) / 2;
+  int dst_stride_y = frameBuffer->StrideY();
+  int dst_stride_uv = dst_stride_y;
+
+  auto totalSize =
+      dst_stride_y * encoded_height + dst_stride_uv * encoded_height / 2;
+
+  // Will be negative when cropping.
+  int padding_top_y = (encoded_height - (int)height_) / 2;
+  int padding_bottom_y = encoded_height - (int)height_ - padding_top_y;
+  int padding_top_uv = padding_top_y / 2;
+  int padding_bottom_uv = encoded_height / 2 - dst_height_uv - padding_top_uv;
+
+  if (SUCCEEDED(hr)) {
     ComPtr<IMFMediaBuffer> mediaBuffer;
     ON_SUCCEEDED(MFCreateMemoryBuffer(totalSize, mediaBuffer.GetAddressOf()));
 
@@ -238,33 +308,47 @@ ComPtr<IMFSample> WinUWPH264EncoderImpl::FromVideoFrame(const VideoFrame& frame)
       ON_SUCCEEDED(mediaBuffer->Lock(
         &destBuffer, &cbMaxLength, &cbCurrentLength));
     }
+    const uint8_t* src_y = frameBuffer->DataY();
+    const uint8_t* src_u = frameBuffer->DataU();
+    const uint8_t* src_v = frameBuffer->DataV();
+    int src_height = height_;
 
-    if (SUCCEEDED(hr)) {
-      BYTE* destUV = destBuffer +
-        (frameBuffer->StrideY() * frameBuffer->height());
-      libyuv::I420ToNV12(
-        frameBuffer->DataY(), frameBuffer->StrideY(),
-        frameBuffer->DataU(), frameBuffer->StrideU(),
-        frameBuffer->DataV(), frameBuffer->StrideV(),
-        destBuffer, frameBuffer->StrideY(),
-        destUV, frameBuffer->StrideY(),
-        frameBuffer->width(),
-        frameBuffer->height());
+    BYTE* dst_y = destBuffer;
+    BYTE* dst_uv = dst_y + dst_stride_y * encoded_height;
+
+	if (encoded_height > (int)height_) {
+      // Pad the destination.
+      dst_y += dst_stride_y * padding_top_y;
+      dst_uv += dst_stride_uv * padding_top_uv;
+    } else {
+      // Crop the source.
+      src_y += frameBuffer->StrideY() * -padding_top_y;
+      src_u += frameBuffer->StrideU() * -padding_top_uv;
+      src_v += frameBuffer->StrideV() * -padding_top_uv;
+      src_height = encoded_height;
     }
+    if (SUCCEEDED(hr)) {
+      libyuv::I420ToNV12(src_y, frameBuffer->StrideY(), src_u,
+                         frameBuffer->StrideU(), src_v, frameBuffer->StrideV(),
+                         dst_y, dst_stride_y, dst_uv, dst_stride_uv, width_, src_height);
 
-    {
-      if (frameBuffer->width() != (int)width_ || frameBuffer->height() != (int)height_) {
-        EncodedImageCallback* tempCallback = encodedCompleteCallback_;
-        Release();
-        {
-          rtc::CritScope lock(&callbackCrit_);
-          encodedCompleteCallback_ = tempCallback;
-        }
-
-        width_ = frameBuffer->width();
-        height_ = frameBuffer->height();
-        InitEncoderWithSettings(&codec_);
-        RTC_LOG(LS_WARNING) << "Resolution changed to: " << frameBuffer->width() << "x" << frameBuffer->height();
+      if (padding_top_y > 0) {
+        libyuv::CopyPlane(dst_y, dst_stride_y,
+                          destBuffer, dst_stride_y,
+                          width_, -padding_top_y);
+        libyuv::CopyPlane(dst_uv, dst_stride_uv,
+                          dst_uv - (dst_stride_uv * padding_top_uv), dst_stride_uv,
+                          width_, -padding_top_uv);
+      }
+      if (padding_bottom_y > 0) {
+        BYTE* dst_end_y = dst_y + (dst_stride_y * height_);
+        BYTE* dst_end_uv = dst_uv + (dst_stride_uv * dst_height_uv);
+        libyuv::CopyPlane(dst_end_y - (dst_stride_y * padding_bottom_y),
+                          dst_stride_y, dst_end_y,
+                          dst_stride_y, width_, -padding_bottom_y);
+        libyuv::CopyPlane(dst_end_uv - (dst_stride_uv * padding_bottom_uv),
+                          dst_stride_uv, dst_end_uv, dst_stride_uv, width_,
+                          -padding_bottom_uv);
       }
     }
 
@@ -273,7 +357,7 @@ ComPtr<IMFSample> WinUWPH264EncoderImpl::FromVideoFrame(const VideoFrame& frame)
       startTime_ = frame.timestamp();
     }
 
-    auto timestampHns = ((frame.timestamp() - startTime_) / 90) * 1000 * 10;
+    auto timestampHns = GetFrameTimestampHns(frame);
     ON_SUCCEEDED(sample->SetSampleTime(timestampHns));
 
     if (SUCCEEDED(hr)) {
@@ -295,8 +379,8 @@ ComPtr<IMFSample> WinUWPH264EncoderImpl::FromVideoFrame(const VideoFrame& frame)
       _sampleAttributeQueue.push(timestampHns, frameAttributes);
     }
 
-    ON_SUCCEEDED(mediaBuffer->SetCurrentLength(
-      frameBuffer->width() * frameBuffer->height() * 3 / 2));
+    ON_SUCCEEDED(
+        mediaBuffer->SetCurrentLength(totalSize));
 
     if (destBuffer != nullptr) {
       mediaBuffer->Unlock();
@@ -313,17 +397,43 @@ ComPtr<IMFSample> WinUWPH264EncoderImpl::FromVideoFrame(const VideoFrame& frame)
   return sample;
 }
 
+// Returns the timestamp in hundreds of nanoseconds (Media Foundation unit)
+LONGLONG WinUWPH264EncoderImpl::GetFrameTimestampHns(const VideoFrame& frame) const {
+  // H.264 clock rate is 90kHz (https://tools.ietf.org/html/rfc6184#page-11).
+  // timestamp_100ns = timestamp_90kHz / {90'000 Hz} * {10'000'000 hns/sec}
+  return (frame.timestamp() - startTime_) * 10'000 / 90;
+}
+
 int WinUWPH264EncoderImpl::Encode(
   const VideoFrame& frame,
   const CodecSpecificInfo* codec_specific_info,
   const std::vector<FrameType>* frame_types) {
-  {
-      rtc::CritScope lock(&crit_);
-      if (!inited_) {
-      return -1;
-    }
+  if (!inited_) {
+    return WEBRTC_VIDEO_CODEC_UNINITIALIZED;
   }
 
+  {
+    rtc::scoped_refptr<webrtc::VideoFrameBuffer> frame_buffer =
+        frame.video_frame_buffer();
+    int cur_width = frame_buffer->width();
+    int cur_height = frame_buffer->height();
+    int64_t now = rtc::TimeMillis();
+
+    rtc::CritScope lock(&crit_);
+    // Reset the encoder configuration if necessary.
+    bool res_changed = cur_width != (int)width_ || cur_height != (int)height_;
+    bool should_change_rate_now =
+        rate_change_requested_ &&
+        (now - last_rate_change_time_rtc_ms) > kMinIntervalBetweenRateChangesMs;
+    if (res_changed || should_change_rate_now) {
+      int res = ReconfigureSinkWriter(cur_width, cur_height, next_target_bps_,
+                                      next_frame_rate_);
+      if (FAILED(res)) {
+        return res;
+      }
+      rate_change_requested_ = false;
+    }
+  }
 
   if (frame_types != nullptr) {
     for (auto frameType : *frame_types) {
@@ -347,10 +457,19 @@ int WinUWPH264EncoderImpl::Encode(
   ComPtr<IMFSample> sample;
   {
     rtc::CritScope lock(&crit_);
-    if (_sampleAttributeQueue.size() > 2) {
-      return WEBRTC_VIDEO_CODEC_OK;
+    // Only encode the frame if the encoder pipeline is not full.
+    if (_sampleAttributeQueue.size() <= 2) {
+      sample = FromVideoFrame(frame);
     }
-    sample = FromVideoFrame(frame);
+  }
+
+  if (!sample) {
+    // Drop the frame. Send a tick to keep the encoder going.
+    lastFrameDropped_ = true;
+    auto timestampHns = GetFrameTimestampHns(frame);
+    ON_SUCCEEDED(sinkWriter_->SendStreamTick(streamIndex_, timestampHns));
+    lastTimestampHns_ = timestampHns;
+    return WEBRTC_VIDEO_CODEC_OK;
   }
 
   ON_SUCCEEDED(sinkWriter_->WriteSample(streamIndex_, sample.Get()));
@@ -370,6 +489,17 @@ void WinUWPH264EncoderImpl::OnH264Encoded(ComPtr<IMFSample> sample) {
   DWORD totalLength;
   HRESULT hr = S_OK;
   ON_SUCCEEDED(sample->GetTotalLength(&totalLength));
+
+  LONGLONG sampleTimestamp = 0;
+  ON_SUCCEEDED(sample->GetSampleTime(&sampleTimestamp));
+
+  // Pop the attributes for this frame. This must be done even if the
+  // frame is discarded later, or the queue will clog.
+  CachedFrameAttributes frameAttributes;
+  if (!_sampleAttributeQueue.pop(sampleTimestamp, frameAttributes)) {
+    // No point in processing a frame that doesn't have correct attributes.
+    return;
+  }
 
   ComPtr<IMFMediaBuffer> buffer;
   hr = sample->GetBufferByIndex(0, &buffer);
@@ -453,30 +583,16 @@ void WinUWPH264EncoderImpl::OnH264Encoded(ComPtr<IMFSample> sample) {
         fragmentationHeader.fragmentationOffset[fragIdx - 1];
     }
 
+    encodedImage.SetTimestamp(frameAttributes.timestamp);
+    encodedImage.ntp_time_ms_ = frameAttributes.ntpTime;
+    encodedImage.capture_time_ms_ = frameAttributes.captureRenderTime;
+    encodedImage._encodedWidth = frameAttributes.frameWidth;
+    encodedImage._encodedHeight = frameAttributes.frameHeight;
+	encodedImage.xr_timestamp_ = frameAttributes.xr_timestamp_;
+
     {
       rtc::CritScope lock(&callbackCrit_);
       --framePendingCount_;
-      if (encodedCompleteCallback_ == nullptr) {
-        return;
-      }
-
-      LONGLONG sampleTimestamp;
-      sample->GetSampleTime(&sampleTimestamp);
-
-      CachedFrameAttributes frameAttributes;
-      if (_sampleAttributeQueue.pop(sampleTimestamp, frameAttributes)) {
-        encodedImage.SetTimestamp(frameAttributes.timestamp);
-        encodedImage.ntp_time_ms_ = frameAttributes.ntpTime;
-        encodedImage.capture_time_ms_ = frameAttributes.captureRenderTime;
-        encodedImage._encodedWidth = frameAttributes.frameWidth;
-        encodedImage._encodedHeight = frameAttributes.frameHeight;
-        encodedImage.xr_timestamp_ = frameAttributes.xr_timestamp_;
-      }
-      else {
-        // No point in confusing the callback with a frame that doesn't
-        // have correct attributes.
-        return;
-      }
 
 	  if (encodedCompleteCallback_ != nullptr) {
 		CodecSpecificInfo codecSpecificInfo;
@@ -497,52 +613,83 @@ int WinUWPH264EncoderImpl::SetChannelParameters(
 #define DYNAMIC_FPS
 #define DYNAMIC_BITRATE
 
-int WinUWPH264EncoderImpl::SetRates(
-  uint32_t new_bitrate_kbit, uint32_t new_framerate) {
-  RTC_LOG(LS_INFO) << "WinUWPH264EncoderImpl::SetRates("
-    << new_bitrate_kbit << "kbit " << new_framerate << "fps)";
+int WinUWPH264EncoderImpl::SetRates(uint32_t new_bitrate_kbit,
+                                    uint32_t new_framerate) {
+  if (sinkWriter_ == nullptr) {
+    return WEBRTC_VIDEO_CODEC_UNINITIALIZED;
+  }
+  RTC_LOG(LS_INFO) << "WinUWPH264EncoderImpl::SetRates(" << new_bitrate_kbit
+                   << "kbit " << new_framerate << "fps)";
 
-  // This may happen.  Ignore it.
+  // This may happen. Ignore it.
   if (new_framerate == 0) {
     return WEBRTC_VIDEO_CODEC_OK;
   }
 
+  int64_t now = rtc::TimeMillis();
   rtc::CritScope lock(&crit_);
-  if (sinkWriter_ == nullptr) {
-    return WEBRTC_VIDEO_CODEC_UNINITIALIZED;
+  int64_t time_to_wait_before_rate_change =
+      kMinIntervalBetweenRateChangesMs - (now - last_rate_change_time_rtc_ms);
+  if (time_to_wait_before_rate_change > 0) {
+    // Delay rate update until the interval has passed.
+    RTC_LOG(LS_INFO) << "Postponing this SetRates() in "
+                     << time_to_wait_before_rate_change << " ms.\n";
+    next_target_bps_ = new_bitrate_kbit * 1000;
+    next_frame_rate_ = new_framerate;
+    rate_change_requested_ = true;
+    return WEBRTC_VIDEO_CODEC_OK;
   }
+  // Update the configuration.
+  return ReconfigureSinkWriter(width_, height_, new_bitrate_kbit * 1000,
+                               new_framerate);
+}
 
+int WinUWPH264EncoderImpl::ReconfigureSinkWriter(UINT32 new_width,
+                                                 UINT32 new_height,
+                                                 UINT32 new_target_bps,
+                                                 UINT32 new_frame_rate) {
+  // NOTE: must be called under crit_ lock.
+  RTC_LOG(LS_INFO) << "WinUWPH264EncoderImpl::ResetSinkWriter() " << new_width
+                   << "x" << new_height << "@" << new_frame_rate << " "
+                   << new_target_bps / 1000 << "kbps";
+  bool resUpdated = false;
   bool bitrateUpdated = false;
   bool fpsUpdated = false;
 
+  if (width_ != new_width || height_ != new_height) {
+    resUpdated = true;
+    width_ = new_width;
+    height_ = new_height;
+  }
+
 #ifdef DYNAMIC_BITRATE
-  if (target_bps_ != (new_bitrate_kbit * 1000)) {
-    target_bps_ = new_bitrate_kbit * 1000;
+  // Ignore small changes.
+  if (std::abs((int)target_bps_ - (int)new_target_bps) >
+      target_bps_ * kMinRateVariation) {
     bitrateUpdated = true;
+    target_bps_ = new_target_bps;
   }
 #endif
 
 #ifdef DYNAMIC_FPS
-  // Fps changes seems to be expensive, make it granular to several frames per second.
-  if (frame_rate_ != new_framerate && std::abs((int)frame_rate_ - (int)new_framerate) > 5) {
-    frame_rate_ = new_framerate;
+  // Ignore small changes.
+  if (std::abs((int)frame_rate_ - (int)new_frame_rate) >
+      frame_rate_ * kMinRateVariation) {
     fpsUpdated = true;
+    frame_rate_ = new_frame_rate;
   }
 #endif
 
-  if (bitrateUpdated || fpsUpdated) {
-    if ((rtc::TimeMillis() - lastTimeSettingsChanged_) < 15000) {
-      RTC_LOG(LS_INFO) << "Last time settings changed was too soon, skipping this SetRates().\n";
-      return WEBRTC_VIDEO_CODEC_OK;
-    }
-
+  if (resUpdated || bitrateUpdated || fpsUpdated) {
     EncodedImageCallback* tempCallback = encodedCompleteCallback_;
-    Release();
+    ReleaseWriter();
     {
       rtc::CritScope lock(&callbackCrit_);
       encodedCompleteCallback_ = tempCallback;
     }
-    InitEncoderWithSettings(&codec_);
+    InitWriter();
+
+    last_rate_change_time_rtc_ms = rtc::TimeMillis();
   }
 
   return WEBRTC_VIDEO_CODEC_OK;
