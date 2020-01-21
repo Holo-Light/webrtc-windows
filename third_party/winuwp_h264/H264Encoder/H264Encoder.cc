@@ -280,8 +280,11 @@ ComPtr<IMFSample> WinUWPH264EncoderImpl::FromVideoFrame(const VideoFrame& frame)
   rtc::scoped_refptr<I420BufferInterface> frameBuffer =
       static_cast<I420BufferInterface*>(frame.video_frame_buffer().get());
 
-  assert(frameBuffer->width() == width_);
-  assert(frameBuffer->height() == height_);
+  //clang doesn't like this comparison because framebuffer members are signed whereas
+  //our member isn't. For this reason we cast to unsigned first before comparing.
+  //More info: https://stackoverflow.com/a/20543204
+  assert(static_cast<uint32_t>(frameBuffer->width()) == width_);
+  assert(static_cast<uint32_t>(frameBuffer->height()) == height_);
   int encoded_height = HeightToEncode(height_);
 
   int dst_height_uv = (height_ + 1) / 2;
