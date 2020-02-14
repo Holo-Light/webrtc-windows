@@ -393,7 +393,7 @@ HRESULT WinUWPH264DecoderImpl::FlushFrames(const EncodedImage& input_image) {
         return hr;
       }
 
-      auto buffer = hololight::D3D11VideoFrameBuffer::Create(
+      auto buffer = hlr::D3D11VideoFrameBuffer::Create(
           nullptr, nullptr, out_texture.Get(), width_.value(), height_.value());
       buffer->set_subresource_index(subresource_index);
 
