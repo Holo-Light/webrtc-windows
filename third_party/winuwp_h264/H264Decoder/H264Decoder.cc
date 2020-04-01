@@ -648,14 +648,14 @@ HRESULT WinUWPH264DecoderImpl::EnqueueFrame(const EncodedImage& input_image,
     return hr;
   }
 
-  // maybe we need to set sample duration here?
-  float duration_hns = 16.6 * 10000;
-  LONGLONG duration = static_cast<LONGLONG>(duration_hns);
-  ON_SUCCEEDED(in_sample->SetSampleDuration(duration));
-  if (FAILED(hr)) {
-    RTC_LOG(LS_ERROR) << "Decode failure: failed to set in_sample duration.";
-    return hr;
-  }
+  // // maybe we need to set sample duration here?
+  // float duration_hns = 16.6 * 10000;
+  // LONGLONG duration = static_cast<LONGLONG>(duration_hns);
+  // ON_SUCCEEDED(in_sample->SetSampleDuration(duration));
+  // if (FAILED(hr)) {
+  //   RTC_LOG(LS_ERROR) << "Decode failure: failed to set in_sample duration.";
+  //   return hr;
+  // }
 
   // Set sample attributes
   ComPtr<IMFAttributes> sample_attrs;
