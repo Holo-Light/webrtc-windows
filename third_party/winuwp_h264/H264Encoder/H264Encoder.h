@@ -56,7 +56,7 @@ class WinUWPH264EncoderImpl : public VideoEncoder, public IH264EncodingCallback 
 
  private:
   ComPtr<IMFSample> FromVideoFrame(const VideoFrame& frame);
-  int InitWriter();
+  //int InitWriter();
   int ReleaseWriter();
   LONGLONG GetFrameTimestampHns(const VideoFrame& frame) const;
   int ReconfigureSinkWriter(UINT32 new_width,
@@ -92,7 +92,7 @@ class WinUWPH264EncoderImpl : public VideoEncoder, public IH264EncodingCallback 
   UINT32 height_;
   UINT32 frame_rate_;
   UINT32 target_bps_;
-  UINT32 max_qp_;
+ // UINT32 max_qp_;
   VideoCodecMode mode_;
   // H.264 specifc parameters
   bool frame_dropping_on_;
@@ -100,7 +100,7 @@ class WinUWPH264EncoderImpl : public VideoEncoder, public IH264EncodingCallback 
 
   int64_t last_rate_change_time_rtc_ms {};
   bool rate_change_requested_ {};
-
+ int64_t lastTimeSettingsChanged_ {};
   // Values to use as soon as the min interval between rate changes has passed
   UINT32 next_frame_rate_;
   UINT32 next_target_bps_;

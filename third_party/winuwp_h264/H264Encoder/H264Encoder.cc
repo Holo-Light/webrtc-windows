@@ -53,7 +53,7 @@ namespace webrtc {
 static constexpr int kLowH264QpThreshold = 24;
 static constexpr int kHighH264QpThreshold = 37;
 
-static constexpr unsigned kMaxH264Qp = 51;
+//static constexpr unsigned kMaxH264Qp = 51;
 
 // On some encoders (e.g. Hololens) changing rates is slow and will cause
 // visible stuttering, so we don't want to do it too often.
@@ -61,7 +61,7 @@ static constexpr unsigned kMaxH264Qp = 51;
 // end up being off the requested value by a small amount in the long term. We
 // should not ignore small variations but possibly use a longer min interval so
 // they are eventually applied.
-static constexpr int kMinIntervalBetweenRateChangesMs = 5000;
+static constexpr int kMinIntervalBetweenRateChangesMs = 0;
 static constexpr float kMinRateVariation = 0.1f;
 
 //////////////////////////////////////////
@@ -75,7 +75,7 @@ WinUWPH264EncoderImpl::WinUWPH264EncoderImpl()
 WinUWPH264EncoderImpl::~WinUWPH264EncoderImpl() {
   Release();
 }
-
+/*
 namespace {
 
 UINT32 HeightToEncode(UINT32 height) {
@@ -88,6 +88,74 @@ UINT32 HeightToEncode(UINT32 height) {
     case kFrameHeightPad:
       return (height + 15) & ~15;
   }
+}
+}  // namespace*/
+namespace {
+  
+UINT32 HeightToEncode(UINT32 height) {
+  switch (webrtc__WinUWPH264EncoderImpl__frame_height_round_mode) {
+    default:
+	case kFrameHeightNoChange:
+      return height;
+    case kFrameHeightCrop:
+      return height & ~15;
+    case kFrameHeightPad:
+      return (height + 15) & ~15;
+  }
+}
+HRESULT MakeMediaTypeOut(UINT32 width,
+                         UINT32 height,
+                         UINT32 target_bps,
+                         UINT32 frame_rate,
+                         IMFMediaType** res_out) {
+  HRESULT hr = S_OK;
+  // output media type (h264)
+  ON_SUCCEEDED(MFCreateMediaType(res_out));
+  auto media_type_out = *res_out;
+  ON_SUCCEEDED(media_type_out->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video));
+  ON_SUCCEEDED(media_type_out->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264));
+  // Lumia 635 and Lumia 1520 Windows phones don't work well
+  // with constrained baseline profile.
+  // todo(fibann): this is obsolete and should probably use the profile passed
+  // in the settings
+  // ON_SUCCEEDED(media_type_out->SetUINT32(MF_MT_MPEG2_PROFILE,
+  // eAVEncH264VProfile_ConstrainedBase));
+
+  ON_SUCCEEDED(media_type_out->SetUINT32(MF_MT_AVG_BITRATE, target_bps));
+  ON_SUCCEEDED(media_type_out->SetUINT32(MF_MT_INTERLACE_MODE,
+                                         MFVideoInterlace_Progressive));
+  ON_SUCCEEDED(MFSetAttributeSize(media_type_out, MF_MT_FRAME_SIZE, width,
+                                  height));
+  ON_SUCCEEDED(MFSetAttributeRatio(media_type_out, MF_MT_FRAME_RATE,
+                                   frame_rate, 1));
+  return hr;
+}
+
+HRESULT SetMediaTypeIn(const ComPtr<IMFSinkWriter>& sink_writer,
+                    DWORD stream_index,
+                    UINT32 width,
+                    UINT32 height,
+                    UINT32 frame_rate) {
+  HRESULT hr = S_OK;
+  // input media type (nv12)
+  ComPtr<IMFMediaType> media_type_in;
+  ON_SUCCEEDED(MFCreateMediaType(&media_type_in));
+  ON_SUCCEEDED(media_type_in->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video));
+  ON_SUCCEEDED(media_type_in->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12));
+  ON_SUCCEEDED(media_type_in->SetUINT32(MF_MT_INTERLACE_MODE,
+                                        MFVideoInterlace_Progressive));
+  ON_SUCCEEDED(media_type_in->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE));
+  ON_SUCCEEDED(MFSetAttributeSize(media_type_in.Get(), MF_MT_FRAME_SIZE, width,
+                                  height));
+  // The actual input frame rate is not available here. Use the same as the
+  // output rate so no interpolation is needed. Also note that some encoders
+  // (e.g. Hololens 2) do not work well with different in/out frame rates.
+  ON_SUCCEEDED(MFSetAttributeRatio(media_type_in.Get(), MF_MT_FRAME_RATE,
+                                   frame_rate, 1));
+
+  ON_SUCCEEDED(sink_writer->SetInputMediaType(stream_index, media_type_in.Get(),
+                                              nullptr));
+  return hr;
 }
 }  // namespace
 
@@ -115,7 +183,7 @@ int WinUWPH264EncoderImpl::InitEncode(const VideoCodec* codec_settings,
   // the desired frame rate too.
   frame_rate_ = codec_settings->maxFramerate;
 
-  max_qp_ = std::min(codec_settings->qpMax, kMaxH264Qp);
+  //max_qp_ = std::min(codec_settings->qpMax, kMaxH264Qp);
 
   mode_ = codec_settings->mode;
   frame_dropping_on_ = codec_settings->H264().frameDroppingOn;
@@ -137,12 +205,49 @@ int WinUWPH264EncoderImpl::InitEncode(const VideoCodec* codec_settings,
   HRESULT hr = S_OK;
   ON_SUCCEEDED(MFStartup(MF_VERSION));
 
-  ON_SUCCEEDED(InitWriter());
+  //ON_SUCCEEDED(InitWriter());
 
+// Create the media sink
+  ON_SUCCEEDED(Microsoft::WRL::MakeAndInitialize<H264MediaSink>(&mediaSink_));
+
+  // SinkWriter creation attributes
+  ComPtr<IMFAttributes> sinkWriterCreationAttributes;
+  ON_SUCCEEDED(MFCreateAttributes(&sinkWriterCreationAttributes, 1));
+  ON_SUCCEEDED(sinkWriterCreationAttributes->SetUINT32(
+    MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE));
+  ON_SUCCEEDED(sinkWriterCreationAttributes->SetUINT32(
+    MF_SINK_WRITER_DISABLE_THROTTLING, TRUE));
+  ON_SUCCEEDED(sinkWriterCreationAttributes->SetUINT32(
+    MF_LOW_LATENCY, TRUE));
+
+  // Create the sink writer
+  ON_SUCCEEDED(MFCreateSinkWriterFromMediaSink(mediaSink_.Get(),
+    sinkWriterCreationAttributes.Get(), &sinkWriter_));
+
+  // Add the h264 output stream to the writer
+  ComPtr<IMFMediaType> media_type_out;
+  ON_SUCCEEDED(MakeMediaTypeOut(width_, height_, target_bps_, frame_rate_,
+                                &media_type_out));
+  ON_SUCCEEDED(sinkWriter_->AddStream(media_type_out.Get(), &streamIndex_));
+
+  // Set the input media type.
+  ON_SUCCEEDED(
+      SetMediaTypeIn(sinkWriter_, streamIndex_, width_, height_, frame_rate_));
+
+  // Register this as the callback for encoded samples.
+  ON_SUCCEEDED(mediaSink_->RegisterEncodingCallback(this));
+
+  ON_SUCCEEDED(sinkWriter_->BeginWriting());
+
+  if (SUCCEEDED(hr)) {
+    inited_ = true;
+    lastTimeSettingsChanged_ = rtc::TimeMillis();
+    return WEBRTC_VIDEO_CODEC_OK;
+  }
   return hr;
 }
 
-int WinUWPH264EncoderImpl::InitWriter() {
+/*int WinUWPH264EncoderImpl::InitWriter() {
   HRESULT hr = S_OK;
 
   rtc::CritScope lock(&crit_);
@@ -226,7 +331,7 @@ int WinUWPH264EncoderImpl::InitWriter() {
     return hr;
   }
 }
-
+*/
 int WinUWPH264EncoderImpl::RegisterEncodeCompleteCallback(
   EncodedImageCallback* callback) {
   rtc::CritScope lock(&callbackCrit_);
@@ -234,7 +339,7 @@ int WinUWPH264EncoderImpl::RegisterEncodeCompleteCallback(
   return WEBRTC_VIDEO_CODEC_OK;
 }
 
-int WinUWPH264EncoderImpl::ReleaseWriter() {
+inline int WinUWPH264EncoderImpl::ReleaseWriter() {
   // Use a temporary sink variable to prevent lock inversion
   // between the shutdown call and OnH264Encoded() callback.
   ComPtr<H264MediaSink> tmpMediaSink;
@@ -678,6 +783,46 @@ int WinUWPH264EncoderImpl::ReconfigureSinkWriter(UINT32 new_width,
   // Ignore small changes.
   if (std::abs((int)frame_rate_ - (int)new_frame_rate) >
       frame_rate_ * kMinRateVariation) {
+        //from here alternative code 
+    fpsUpdated = true;
+    frame_rate_ = new_frame_rate;
+  }
+#endif
+
+  if (resUpdated || bitrateUpdated || fpsUpdated) {
+    ComPtr<IMFSinkWriterEncoderConfig> encoderConfig;
+    sinkWriter_.As(&encoderConfig);
+    HRESULT hr = S_OK;
+    // Update the output format.
+    ComPtr<IMFMediaType> media_type_out;
+    ON_SUCCEEDED(MakeMediaTypeOut(width_, height_, target_bps_, frame_rate_,
+                                  &media_type_out));
+    ON_SUCCEEDED(encoderConfig->SetTargetMediaType(
+        streamIndex_, media_type_out.Get(), nullptr));
+    if (resUpdated || fpsUpdated) {
+      // If the output frame rate changed, we need to change the input
+      // accordingly.
+      ON_SUCCEEDED(SetMediaTypeIn(sinkWriter_, streamIndex_, width_, height_,
+                                  frame_rate_));
+    }
+
+    lastTimeSettingsChanged_ = rtc::TimeMillis();
+  }
+
+  return WEBRTC_VIDEO_CODEC_OK;
+}
+
+VideoEncoder::ScalingSettings WinUWPH264EncoderImpl::GetScalingSettings() const {
+  return ScalingSettings(kLowH264QpThreshold, kHighH264QpThreshold);
+}
+
+const char* WinUWPH264EncoderImpl::ImplementationName() const {
+  return "H264_MediaFoundation";
+}
+
+}  // namespace webrtc
+        
+        /*
     fpsUpdated = true;
     frame_rate_ = new_frame_rate;
   }
@@ -706,4 +851,4 @@ const char* WinUWPH264EncoderImpl::ImplementationName() const {
   return "H264_MediaFoundation";
 }
 
-}  // namespace webrtc
+} */
