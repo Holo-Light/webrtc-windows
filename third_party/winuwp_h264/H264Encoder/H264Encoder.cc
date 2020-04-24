@@ -61,7 +61,7 @@ static constexpr int kHighH264QpThreshold = 37;
 // end up being off the requested value by a small amount in the long term. We
 // should not ignore small variations but possibly use a longer min interval so
 // they are eventually applied.
-static constexpr int kMinIntervalBetweenRateChangesMs = 0;
+static constexpr int kMinIntervalBetweenRateChangesMs = 10000;
 static constexpr float kMinRateVariation = 0.1f;
 
 //////////////////////////////////////////
@@ -730,7 +730,7 @@ int WinUWPH264EncoderImpl::SetRates(uint32_t new_bitrate_kbit,
                    << "kbit " << new_framerate << "fps)";
 
   // This may happen. Ignore it.
-  if (new_framerate == 0) {
+  if (new_framerate <10) {
     return WEBRTC_VIDEO_CODEC_OK;
   }
 
