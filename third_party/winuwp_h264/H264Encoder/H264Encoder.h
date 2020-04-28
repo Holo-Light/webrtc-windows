@@ -111,7 +111,7 @@ class WinUWPH264EncoderImpl : public VideoEncoder, public IH264EncodingCallback 
     uint64_t captureRenderTime;
     uint32_t frameWidth;
     uint32_t frameHeight;
-    XRTimestamp xr_timestamp_;
+    XRFrameData xr_frame_data_;
   };
   SampleAttributeQueue<CachedFrameAttributes> _sampleAttributeQueue;
 

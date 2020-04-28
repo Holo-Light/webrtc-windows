@@ -407,7 +407,7 @@ HRESULT WinUWPH264DecoderImpl::FlushFrames(const EncodedImage& input_image) {
       VideoFrame decoded_frame(buffer, input_image.Timestamp(), 0,
                                kVideoRotation_0);
 
-      decoded_frame.set_xr_timestamp(input_image.xr_timestamp_);
+      decoded_frame.set_xr_frame_data(input_image.xr_frame_data_);
 
       // Use ntp time from the earliest frame
       decoded_frame.set_ntp_time_ms(input_image.ntp_time_ms_);
@@ -563,7 +563,7 @@ HRESULT WinUWPH264DecoderImpl::FlushFrames(const EncodedImage& input_image) {
       VideoFrame decoded_frame(buffer, input_image.Timestamp(), 0,
                                kVideoRotation_0);
 
-      decoded_frame.set_xr_timestamp(input_image.xr_timestamp_);
+      decoded_frame.set_xr_frame_data(input_image.xr_frame_data_);
 
       // Use ntp time from the earliest frame
       decoded_frame.set_ntp_time_ms(input_image.ntp_time_ms_);

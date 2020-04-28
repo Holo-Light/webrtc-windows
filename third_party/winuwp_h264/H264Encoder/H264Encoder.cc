@@ -483,7 +483,7 @@ ComPtr<IMFSample> WinUWPH264EncoderImpl::FromVideoFrame(const VideoFrame& frame)
       frameAttributes.captureRenderTime = frame.render_time_ms();
       frameAttributes.frameWidth = frame.width();
       frameAttributes.frameHeight = frame.height();
-      frameAttributes.xr_timestamp_ = frame.xr_timestamp();
+      frameAttributes.xr_frame_data_ = frame.xr_frame_data();
       _sampleAttributeQueue.push(timestampHns, frameAttributes);
     }
 
@@ -696,7 +696,7 @@ void WinUWPH264EncoderImpl::OnH264Encoded(ComPtr<IMFSample> sample) {
     encodedImage.capture_time_ms_ = frameAttributes.captureRenderTime;
     encodedImage._encodedWidth = frameAttributes.frameWidth;
     encodedImage._encodedHeight = frameAttributes.frameHeight;
-	encodedImage.xr_timestamp_ = frameAttributes.xr_timestamp_;
+	  encodedImage.xr_frame_data_ = frameAttributes.xr_frame_data_;
 
     {
       rtc::CritScope lock(&callbackCrit_);
