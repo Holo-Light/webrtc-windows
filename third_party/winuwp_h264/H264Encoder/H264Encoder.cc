@@ -579,12 +579,8 @@ int WinUWPH264EncoderImpl::Encode(
     // Drop the frame. Send a tick to keep the encoder going.
     lastFrameDropped_ = true;
     auto timestampHns = GetFrameTimestampHns(frame);
-    HRESULT hr;
-    hr=sinkWriter_->SendStreamTick(streamIndex_, timestampHns);
-    if(hr!=0){
-      InitEncode(&codecSettings_,0,0);//this fixes the sinkwriter if a crash happens
-    }
-    ON_SUCCEEDED(hr);
+    ON_SUCCEEDED(sinkWriter_->SendStreamTick(streamIndex_, timestampHns));
+
     lastTimestampHns_ = timestampHns;
     return WEBRTC_VIDEO_CODEC_OK;
   }
@@ -770,6 +766,7 @@ int WinUWPH264EncoderImpl::ReconfigureSinkWriter(UINT32 new_width,
   RTC_LOG(LS_INFO) << "WinUWPH264EncoderImpl::ResetSinkWriter() " << new_width
                    << "x" << new_height << "@" << new_frame_rate << " "
                    << new_target_bps / 1000 << "kbps";
+ // new_frame_rate=60;//hardcode framerate to 60
   bool resUpdated = false;
   bool bitrateUpdated = false;
   bool fpsUpdated = false;
