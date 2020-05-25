@@ -393,8 +393,11 @@ HRESULT WinUWPH264DecoderImpl::FlushFrames(const EncodedImage& input_image) {
         return hr;
       }
 
+      D3D11_TEXTURE2D_DESC out_texture_desc = {};
+      out_texture->GetDesc(&out_texture_desc);
+
       auto buffer = hlr::D3D11VideoFrameBuffer::Create(
-          nullptr, nullptr, out_texture.Get(), width_.value(), height_.value());
+          nullptr, nullptr, out_texture.Get(), width_.value(), height_.value(), out_texture_desc.Format);
       buffer->set_subresource_index(subresource_index);
 
       // LONGLONG sample_time; /* unused */
