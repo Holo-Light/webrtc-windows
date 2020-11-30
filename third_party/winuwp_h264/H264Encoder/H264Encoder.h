@@ -56,21 +56,16 @@ class WinUWPH264EncoderImpl : public VideoEncoder, public IH264EncodingCallback 
 
  private:
   ComPtr<IMFSample> FromVideoFrame(const VideoFrame& frame);
-  //int InitWriter();
-  int ReleaseWriter();
-  LONGLONG GetFrameTimestampHns(const VideoFrame& frame) const;
-  int ReconfigureSinkWriter(UINT32 new_width,
-                            UINT32 new_height,
-                            UINT32 new_target_bps,
-                            UINT32 new_frame_rate);
+  int InitEncoderWithSettings(const VideoCodec* codec_settings);
 
  private:
-  VideoCodec codecSettings_;
   rtc::CriticalSection crit_;
   rtc::CriticalSection callbackCrit_;
   bool inited_ {};
   const CodecSpecificInfo* codecSpecificInfo_ {};
   ComPtr<IMFSinkWriter> sinkWriter_;
+  ComPtr<IMFAttributes> sinkWriterCreationAttributes_;
+  ComPtr<IMFAttributes> sinkWriterEncoderAttributes_;
   ComPtr<H264MediaSink> mediaSink_;
   EncodedImageCallback* encodedCompleteCallback_ {};
   DWORD streamIndex_ {};
@@ -78,7 +73,7 @@ class WinUWPH264EncoderImpl : public VideoEncoder, public IH264EncodingCallback 
   LONGLONG lastTimestampHns_ {};
   bool firstFrame_ {true};
   int framePendingCount_ {};
-  //DWORD frameCount_ {};
+  DWORD frameCount_ {};
   bool lastFrameDropped_ {};
   //These fields are never used
   /*
@@ -91,20 +86,14 @@ class WinUWPH264EncoderImpl : public VideoEncoder, public IH264EncodingCallback 
 
   UINT32 width_;
   UINT32 height_;
-  UINT32 frame_rate_;
+  UINT32 max_frame_rate_;
   UINT32 target_bps_;
- // UINT32 max_qp_;
   VideoCodecMode mode_;
   // H.264 specifc parameters
   bool frame_dropping_on_;
   int key_frame_interval_;
 
-  int64_t last_rate_change_time_rtc_ms {};
-  bool rate_change_requested_ {};
- int64_t lastTimeSettingsChanged_ {};
-  // Values to use as soon as the min interval between rate changes has passed
-  UINT32 next_frame_rate_;
-  UINT32 next_target_bps_;
+  int64_t lastTimeSettingsChanged_ {};
 
   struct CachedFrameAttributes {
     uint32_t timestamp;
@@ -116,8 +105,9 @@ class WinUWPH264EncoderImpl : public VideoEncoder, public IH264EncodingCallback 
   };
   SampleAttributeQueue<CachedFrameAttributes> _sampleAttributeQueue;
 
+  // Caching the codec received in InitEncode().
+  VideoCodec codec_;
 };  // end of WinUWPH264EncoderImpl class
 
 }  // namespace webrtc
 #endif  // THIRD_PARTY_H264_WINUWP_H264ENCODER_H264ENCODER_H_
-
