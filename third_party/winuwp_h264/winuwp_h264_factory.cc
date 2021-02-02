@@ -63,20 +63,35 @@ namespace webrtc {
 
   std::vector<SdpVideoFormat> WinUWPH264EncoderFactoryNew::GetSupportedFormats()
     const {
-    std::vector<SdpVideoFormat> formats = { 
-      SdpVideoFormat(cricket::kH264CodecName, 
+    std::vector<SdpVideoFormat> formats = {
+      SdpVideoFormat(cricket::kH264CodecName,
       {
         //copy-pasted from h264.cc
         {cricket::kH264FmtpProfileLevelId, "42100b"},
         {cricket::kH264FmtpLevelAsymmetryAllowed, "1"},
         {cricket::kH264FmtpPacketizationMode, "0"}
       }),
-      SdpVideoFormat(cricket::kH264CodecName, 
+      SdpVideoFormat(cricket::kH264CodecName,
       {
         {cricket::kH264FmtpProfileLevelId, "42100b"},
         {cricket::kH264FmtpLevelAsymmetryAllowed, "1"},
         {cricket::kH264FmtpPacketizationMode, "1"}
-      }) 
+      }),
+      // These are needed for android to be able to connect. I think it's H264 CBP
+      // (constrained baseline profile) vs BP (baseline profile) though I don't know
+      // which is which.
+      SdpVideoFormat(cricket::kH264CodecName,
+      {
+        {cricket::kH264FmtpProfileLevelId, "42e01f"},
+        {cricket::kH264FmtpLevelAsymmetryAllowed, "1"},
+        {cricket::kH264FmtpPacketizationMode, "0"}
+      }),
+      SdpVideoFormat(cricket::kH264CodecName,
+      {
+        {cricket::kH264FmtpProfileLevelId, "42e01f"},
+        {cricket::kH264FmtpLevelAsymmetryAllowed, "1"},
+        {cricket::kH264FmtpPacketizationMode, "1"}
+      })
     };
     return formats;
   }
@@ -103,22 +118,22 @@ namespace webrtc {
   }
 
   std::vector<SdpVideoFormat> WinUWPH264DecoderFactoryNew::GetSupportedFormats() const {
-    
+
     // COPY-PASTED FROM VIDEOENCODERFACTORYNEW
-    std::vector<SdpVideoFormat> formats = { 
-      SdpVideoFormat(cricket::kH264CodecName, 
+    std::vector<SdpVideoFormat> formats = {
+      SdpVideoFormat(cricket::kH264CodecName,
       {
         //copy-pasted from h264.cc
         {cricket::kH264FmtpProfileLevelId, "42100b"},
         {cricket::kH264FmtpLevelAsymmetryAllowed, "1"},
         {cricket::kH264FmtpPacketizationMode, "0"}
       }),
-      SdpVideoFormat(cricket::kH264CodecName, 
+      SdpVideoFormat(cricket::kH264CodecName,
       {
         {cricket::kH264FmtpProfileLevelId, "42100b"},
         {cricket::kH264FmtpLevelAsymmetryAllowed, "1"},
         {cricket::kH264FmtpPacketizationMode, "1"}
-      }) 
+      })
     };
     return formats;
   }
