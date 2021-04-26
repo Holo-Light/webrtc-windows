@@ -48,6 +48,7 @@ class WinUWPH264EncoderImpl : public VideoEncoder, public IH264EncodingCallback 
     const std::vector<FrameType>* frame_types) override;
   int SetChannelParameters(uint32_t packet_loss, int64_t rtt) override;
   int SetRates(uint32_t new_bitrate_kbit, uint32_t frame_rate) override;
+  int SetRates2(uint32_t new_bitrate_kbit, uint32_t frame_rate) ;
   ScalingSettings GetScalingSettings() const override;
   const char* ImplementationName() const override;
 

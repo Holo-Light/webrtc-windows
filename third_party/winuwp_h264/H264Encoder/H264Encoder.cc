@@ -40,7 +40,7 @@
 #pragma comment(lib, "mfuuid.lib")
 
 namespace webrtc {
-
+int64_t currentBitrate=20000;
 // QP scaling thresholds.
 static const int kLowH264QpThreshold = 24;
 static const int kHighH264QpThreshold = 37;
@@ -464,8 +464,16 @@ void WinUWPH264EncoderImpl::OnH264Encoded(ComPtr<IMFSample> sample) {
         encodedImage._encodedWidth = frameAttributes.frameWidth;
         encodedImage._encodedHeight = frameAttributes.frameHeight;
         encodedImage.xr_timestamp_ = frameAttributes.xr_timestamp_;
+        if (frameAttributes.xr_timestamp_.Bandwith!=currentBitrate&&frameAttributes.xr_timestamp_.Bandwith!=0){
+          currentBitrate=frameAttributes.xr_timestamp_.Bandwith;
+          RTC_LOG(LS_ERROR) << "Unity requests: " <<frameAttributes.xr_timestamp_.Bandwith;
+          SetRates2(currentBitrate,max_frame_rate_);
+          RTC_LOG(LS_ERROR) << "rates adapted to " <<currentBitrate;
+
+        }
 
       }
+
       else {
         // No point in confusing the callback with a frame that doesn't
         // have correct attributes.
@@ -490,10 +498,14 @@ int WinUWPH264EncoderImpl::SetChannelParameters(
 
 #define DYNAMIC_FPS
 #define DYNAMIC_BITRATE
-
 int WinUWPH264EncoderImpl::SetRates(
   uint32_t new_bitrate_kbit, uint32_t new_framerate) {
-  RTC_LOG(LS_INFO) << "WinUWPH264EncoderImpl::SetRates("
+    RTC_LOG(LS_ERROR) << "ignoring setrates call";
+    return WEBRTC_VIDEO_CODEC_OK;
+  }
+int WinUWPH264EncoderImpl::SetRates2(
+  uint32_t new_bitrate_kbit, uint32_t new_framerate) {
+  RTC_LOG(LS_ERROR) << "WinUWPH264EncoderImpl::SetRates("
     << new_bitrate_kbit << "kbit " << new_framerate << "fps)";
 
   // This may happen.  Ignore it.
@@ -526,7 +538,7 @@ int WinUWPH264EncoderImpl::SetRates(
 
   if (bitrateUpdated || fpsUpdated) {
     if ((rtc::TimeMillis() - lastTimeSettingsChanged_) < 15000) {
-      RTC_LOG(LS_INFO) << "Last time settings changed was too soon, skipping this SetRates().\n";
+      RTC_LOG(LS_ERROR) << "Last time settings changed was too soon, skipping this SetRates().\n";
       return WEBRTC_VIDEO_CODEC_OK;
     }
 
